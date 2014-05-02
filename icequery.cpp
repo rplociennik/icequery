@@ -5,7 +5,8 @@
 #include <cstdint>      // uint32_t
 #include <algorithm>    // transform()
 #include <cctype>       // tolower
-#include <list>
+#include <vector>
+#include <utility>      // pair
 
 #include <poll.h>
 
@@ -27,6 +28,30 @@
 #define PRINT_ERR( format, args... )    PRINT_BASE( "\e[31m" format "\e[0m", ##args )
 #define PRINT_WARN( format, args... )   PRINT_BASE( "\e[33m" format "\e[0m", ##args )
 #define PRINT_INFO( format, args... )   PRINT_BASE( "\e[32m" format "\e[0m", ##args )
+
+// Const macros
+
+#define VERT_LINE_LO    "|"
+#define CROSS_LO        "+"
+#define HOR_LINE_LO     "-"
+
+#define VERT_LINE_HI    "│"
+#define CROSS_HI        "┼"
+#define HOR_LINE_HI     "─"
+
+#define TICK_HI         "√"
+#define TICK_LO         "X"
+#define NO_TICK_HI      ""
+#define NO_TICK_LO      ""
+
+// Types
+
+enum Alignment
+{
+    Left,
+    Right,
+    Center
+};
 
 // Utility functions
 
@@ -51,6 +76,152 @@ std::string& toLower( std::string& str )
     std::transform( str.begin(), str.end(), str.begin(), tolower );
 
     return str;
+}
+
+std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& header, const std::vector<std::string>& strings, bool plain, bool useLowAscii )
+{
+    auto columnCount = header.size();
+    auto rowCount = strings.size() / columnCount;
+
+    std::vector<std::size_t> lengths( columnCount );
+    std::vector<std::string> data( columnCount * ( rowCount + 1 ) );
+
+    // Determine column lengths
+    for( std::size_t c = 0; c < columnCount; ++c )
+    {
+        auto l = header[c].second.length();
+
+        // Add 1 char margin to the first and last column
+        if( !plain && ( c == 0 || c == columnCount - 1 ) )
+        {
+            ++l;
+        }
+
+        for( std::size_t r = 0; r < rowCount; ++r )
+        {
+            l = std::max( l, strings[columnCount * r + c].length() );
+        }
+
+        lengths[c] = l;
+    }
+
+    // Pad the strings
+    for( std::size_t c = 0; c < columnCount; ++c )
+    {
+        const auto len = lengths[c];
+        const Alignment align = header[c].first;
+
+        for( std::size_t r = 0; r < rowCount + 1; ++r )
+        {
+            std::string str;
+
+            if( r == 0 )
+            {
+                str = header[c].second;
+            }
+            else
+            {
+                str = strings[columnCount * (r - 1) + c];
+            }
+
+            // Add 1 char margin to the first and last column
+            if( !plain )
+            {
+                if( c == 0 )
+                {
+                    str.insert( 0, 1, ' ' );
+                }
+                else if( c == columnCount - 1 )
+                {
+                    str.append( 1, ' ' );
+                }
+            }
+
+            auto strLen = str.length();
+
+            if( strLen == len )
+            {
+                data[columnCount * r + c] = std::move( str );
+            }
+            else
+            {
+                switch( align )
+                {
+                    case Left:
+                        data[columnCount * r + c] = std::move( str.append( len - strLen, ' ' ) );
+                        break;
+
+                    case Right:
+                        data[columnCount * r + c] = std::move( str.insert( 0, len - strLen, ' ' ) );
+                        break;
+
+                    case Center:
+                        data[columnCount * r + c] = std::move( str.append( ( len - strLen ) / 2, ' ' ).insert( 0, ( len - strLen ) - ( len - strLen ) / 2, ' ' ) );
+                        break;
+                }
+            }
+        }
+    }
+
+    // Render the table
+    std::string table;
+
+    for( std::size_t r = 0; r < rowCount + 1; ++r )
+    {
+        for( std::size_t c = 0; c < columnCount; ++c )
+        {
+            if( c > 0 )
+            {
+                if( plain )
+                {
+                   table.append( " " );
+                }
+                else
+                {
+                    if( useLowAscii )
+                    {
+                        table.append( " " VERT_LINE_LO " " );
+                    }
+                    else
+                    {
+                        table.append( " " VERT_LINE_HI " " );
+                    }
+                }
+            }
+
+            table.append( data[columnCount * r + c] );
+        }
+
+        table.append( "\n" );
+
+        // Draw the horizontal line below the header
+        if( r == 0 && !plain )
+        {
+            for( std::size_t c = 0; c < columnCount; ++c )
+            {
+                if( c > 0 )
+                {
+                    if( useLowAscii )
+                    {
+                        table.append( HOR_LINE_LO CROSS_LO HOR_LINE_LO );
+                    }
+                    else
+                    {
+                        table.append( HOR_LINE_HI CROSS_HI HOR_LINE_HI );
+                    }
+                }
+
+                for( std::size_t i = 0; i < lengths[c]; ++i )
+                {
+                    table.append( useLowAscii ? HOR_LINE_LO : HOR_LINE_HI );
+                }
+            }
+
+            table.append( "\n" );
+        }
+    }
+
+    return std::move( table );
 }
 
 // Classes
@@ -200,6 +371,9 @@ int main( void )
     const int schedPort = 0;
     const bool quiet = false;
     const bool brief = false;
+    const bool noTable = false;
+    const bool plain = false;
+    const bool lowAscii = false;
 
     // This somehow suppresses all the internal debug messages sent onto stderr by icecc
     if( quiet )
@@ -257,7 +431,8 @@ int main( void )
         return 1;
     }
 
-    std::list<std::unique_ptr<NodeInfo> > nodeList;
+    std::vector<std::unique_ptr<NodeInfo>> nodes;
+    uint32_t hostIdMax = 0;
 
     while( !channel->read_a_bit() || channel->has_msg() )
     {
@@ -278,7 +453,9 @@ int main( void )
 
             if( nodeInfo )
             {
-                nodeList.push_back( std::move( nodeInfo ) );
+                // Keep track of highest hostId in case the scheduler sends multiple copies of the same hostInfos
+                hostIdMax = std::max( hostIdMax, nodeInfo->hostId() );
+                nodes.push_back( std::move( nodeInfo ) );
             }
 
             continue;
@@ -297,7 +474,7 @@ int main( void )
         }
     }
 
-    if( nodeList.empty() )
+    if( nodes.empty() )
     {
         PRINT_ERR( "No useful data received.\n" );
 
@@ -305,25 +482,54 @@ int main( void )
     }
     else
     {
+        uint32_t cores = 0;
+
+        for( const auto& node : nodes )
+        {
+            if( !node->noRemote() && !node->isOffline() )
+            {
+                cores += node->maxJobs();
+            }
+        }
+
         if( brief )
         {
-            uint32_t jobCount = 0;
-
-            for( const auto& node : nodeList )
-            {
-                if( !node->noRemote() && !node->isOffline() )
-                {
-                    jobCount += node->maxJobs();
-                }
-            }
-
-            printf( "%u\n", jobCount );
+            printf( "%u\n", cores );
         }
         else
         {
-            // <!> Dummy
+            std::vector<std::pair<Alignment, std::string>> header {
+                { Alignment::Right , "Node #" },
+                { Alignment::Center, "Offline?" },
+                { Alignment::Center, "No remote?" },
+                { Alignment::Left  , "Name" },
+                { Alignment::Left  , "IP" },
+                { Alignment::Right , "Cores" },
+                { Alignment::Left  , "Platform" }
+            };
 
-            PRINT_INFO( "%zu nodes found.\n", nodeList.size() );
+            // std:vector<std::string> data( header.size() * nodes.size() );
+            // std::size_t i = 0;
+
+            std::vector<std::string> strings;
+
+            for( const auto& node : nodes )
+            {
+                strings.emplace_back( std::to_string( node->hostId() ) );
+                strings.emplace_back( node->isOffline() ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
+                strings.emplace_back( node->noRemote()  ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
+                strings.push_back( node->name() );
+                strings.push_back( node->ip() );
+                strings.emplace_back( std::to_string( node->maxJobs() ) );
+                strings.push_back( node->platform() );
+            }
+
+            if( !noTable )
+            {
+               printf( "\n%s\n", renderTable( header, strings, plain, lowAscii ).c_str() );
+            }
+
+            PRINT_INFO( "%zu nodes, %u cores total.\n", nodes.size(), cores );
         }
 
         return 0;
