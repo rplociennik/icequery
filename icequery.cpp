@@ -1,113 +1,229 @@
 #include <cstdio>
-#include <memory>
-#include <thread>
-#include <chrono>
+#include <memory>       // unique_ptr
+#include <ctime>        // clock_gettime()
+#include <cstring>      // strerror()
+#include <cstdint>      // uint32_t
+#include <algorithm>    // transform()
+#include <cctype>       // tolower
+#include <list>
 
 #include <poll.h>
 
 #include <icecc/comm.h>
+#include <icecc/logging.h>
 
-std::unique_ptr<MsgChannel> channel;    
+// Utility macros
 
-int threadStatus = 0;
+#define PRINT_BASE( format, args... ) \
+    do \
+    { \
+        if( !quiet ) \
+        { \
+            fprintf( stderr, format, ##args ); \
+        } \
+    } \
+    while( 0 )
 
-void pollingThreadEntry()
+#define PRINT_ERR( format, args... )    PRINT_BASE( "\e[31m" format "\e[0m", ##args )
+#define PRINT_WARN( format, args... )   PRINT_BASE( "\e[33m" format "\e[0m", ##args )
+#define PRINT_INFO( format, args... )   PRINT_BASE( "\e[32m" format "\e[0m", ##args )
+
+// Utility functions
+
+long getTimestamp()
 {
-    const int maxPollRetries = 50;
-    int pollRetries = 0;
-    const int pollTimeout = 3000;
-    struct pollfd pollData { channel->fd, POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI | POLLRDHUP, 0 };
+    static struct timespec ts;
 
-    while( true )
+    clock_gettime( CLOCK_MONOTONIC_RAW, &ts );
+
+    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+std::string toLower( std::string&& str )
+{
+    std::transform( str.begin(), str.end(), str.begin(), tolower );
+
+    return std::move( str );
+}
+
+std::string& toLower( std::string& str )
+{
+    std::transform( str.begin(), str.end(), str.begin(), tolower );
+
+    return str;
+}
+
+// Classes
+
+class NodeInfo
+{
+public:
+    static std::unique_ptr<NodeInfo> create( uint32_t hostId, const std::string& stats )
     {
-        int res = poll( &pollData, 1, pollTimeout );
-
-        if( res < 0 )
+        if( !hostId )
         {
-            fprintf( stderr, "Error ocurred during poll().\n" );
-
-            threadStatus = 1;
-            return;
+            return std::unique_ptr<NodeInfo>();
         }
-        else if( res == 0 )
+
+        std::unique_ptr<NodeInfo> res( new NodeInfo( hostId ) );
+
+        std::string::size_type linePos = 0;
+
+        while( true )
         {
-            fprintf( stderr, "No data read during poll().\n" );
+            auto nextLinePos = stats.find( '\n', linePos );
+            auto colonPos = stats.find( ':', linePos );
 
-            if( pollRetries < maxPollRetries )
+            if( colonPos != std::string::npos && !( nextLinePos != std::string::npos && colonPos > nextLinePos ) )
             {
-                fprintf( stderr, "Retry no. %d...\n", ++pollRetries );
+                std::string name = std::move( toLower( stats.substr( linePos, colonPos - linePos ) ) );
+                std::string value = std::move( stats.substr( colonPos + 1, nextLinePos == std::string::npos ? std::string::npos : nextLinePos - ( colonPos + 1 ) ) );
 
-                continue;
+                if( name == "name" )
+                {
+                    res->m_name = std::move( value );
+                }
+                else if( name == "ip" )
+                {
+                    res->m_ip = std::move( value );
+                }
+                else if( name == "maxjobs" )
+                {
+                    res->m_maxJobs = std::stoi( value );
+                }
+                else if( name == "noremote" )
+                {
+                    res->m_noRemote = ( toLower( value ) == "true" );
+                }
+                else if( name == "state" )
+                {
+                    res->m_offline = ( toLower( value ) == "offline" );
+                }
+                else if( name == "platform" )
+                {
+                    res->m_platform = std::move( value );
+                }
+            }
+
+            linePos = nextLinePos;
+
+            if( nextLinePos == std::string::npos )
+            {
+                break;
             }
             else
             {
-                threadStatus = 1;
-                return;
+                ++linePos;
+
+                if( linePos > stats.length() )
+                {
+                    break;
+                }
             }
         }
 
-        while( !channel->read_a_bit() || channel->has_msg() )
+        if( !res->isValid() )
         {
-            std::unique_ptr<Msg> msg( channel->get_msg() );
-
-            if( !msg )
-            {
-                fprintf( stderr, "No message received, connection might be broken.\n" );
-
-                threadStatus = 1;
-                return;
-            }
-
-            switch( msg->type )
-            {
-                case M_MON_STATS:
-                    
-                    printf( "%s\n", dynamic_cast<MonStatsMsg*>(msg.get())->statmsg.c_str() );
-                    continue;
-
-                case M_END:
-
-                    fprintf( stderr, "Scheduler has quit.\n" );
-                    threadStatus = 1;
-                    return;
-
-                default:
-                    continue;
-            }
+            res.reset( nullptr );
         }
+
+        return res;
     }
-}
+
+    uint32_t hostId() const
+    {
+        return m_hostId;
+    }
+
+    const std::string& name() const
+    {
+        return m_name;
+    }
+
+    const std::string& ip() const
+    {
+        return m_ip;
+    }
+
+    uint32_t maxJobs() const
+    {
+        return m_maxJobs;
+    }
+
+    bool noRemote() const
+    {
+        return m_noRemote;
+    }
+
+    bool isOffline() const
+    {
+        return m_offline;
+    }
+
+    const std::string platform() const
+    {
+        return m_platform;
+    }
+
+private:
+    NodeInfo( uint32_t hostId )
+        : m_hostId( hostId )
+    {
+    }
+
+    bool isValid() const
+    {
+        return m_hostId &&
+               !m_name.empty() &&
+               !m_ip.empty() &&
+               m_maxJobs &&
+               !m_platform.empty();
+    }
+
+private:
+    uint32_t m_hostId = 0;
+    std::string m_name;
+    std::string m_ip;
+    uint32_t m_maxJobs = 0;
+    bool m_noRemote = false;
+    bool m_offline = false;
+    std::string m_platform;
+};
+
+// And the entry point...
 
 int main( void )
 {
     const char* netName = "ICECREAM";
-    const int timeout = 2000000;
+    const int timeout = 2000;
     const char* schedIp = "";
-    const int port = 0;
+    const int schedPort = 0;
+    const bool quiet = false;
+    const bool brief = false;
 
-    std::unique_ptr<DiscoverSched> discover( new DiscoverSched( netName, timeout, schedIp, port ) );
+    // This somehow suppresses all the internal debug messages sent onto stderr by icecc
+    if( quiet )
+    {
+        reset_debug( 0 );
+    }
 
-    int retries = 0;
-    const int maxRetries = 50;
+    std::unique_ptr<MsgChannel> channel;
+    std::unique_ptr<DiscoverSched> discover( new DiscoverSched( netName, timeout, schedIp, schedPort ) );
+
+    long channelTimestamp = getTimestamp();
 
     do
     {
         channel.reset( discover->try_get_scheduler() );
-
-        if( !channel && retries < maxRetries )
-        {
-            fprintf( stderr, "Retry no. %d...\n", ++retries );
-        }
-    } while( !channel && retries < maxRetries );
+    }
+    while( !channel && ( getTimestamp() - channelTimestamp ) < timeout );
 
     if( !channel )
     {
-        if( discover->timed_out() )
+        if( !discover->timed_out() )
         {
-            fprintf( stderr, "Timed out.\n" );
+            PRINT_ERR( "Timed out while trying to connect to the scheduler.\n" );
         }
-
-        fprintf( stderr, "Connection attempt failed.\n" );
 
         return 1;
     }
@@ -115,20 +231,101 @@ int main( void )
     channel->setBulkTransfer();
     discover.reset( nullptr );
 
-    // std::thread pollingThread( pollingThreadEntry );
-
-    std::this_thread::sleep_for( std::chrono::milliseconds( 2000 ) );
-
     if( !channel->send_msg( MonLoginMsg() ) )
     {
-        fprintf( stderr, "Scheduler rejected login message.\n" );
+        PRINT_ERR( "MsgChannel::send_msg(): Scheduler rejected the MonLoginMsg message.\n" );
 
         return 1;
     }
 
-    // pollingThread.join();
+    struct pollfd pollData { channel->fd, POLLIN | POLLPRI, 0 };
 
-    pollingThreadEntry();
+    int pollRes = poll( &pollData, 1, timeout );
 
-    return 0;
+    if( pollRes < 0 )
+    {
+        int lastErrno = errno;
+
+        PRINT_ERR( "poll(): (%d) %s\n", lastErrno, strerror( lastErrno ) );
+
+        return 1;
+    }
+    else if( pollRes == 0 )
+    {
+        PRINT_ERR( "poll(): Timed out white awaiting response from the scheduler.\n" );
+
+        return 1;
+    }
+
+    std::list<std::unique_ptr<NodeInfo> > nodeList;
+
+    while( !channel->read_a_bit() || channel->has_msg() )
+    {
+        std::unique_ptr<Msg> msg( channel->get_msg() );
+
+        if( !msg )
+        {
+            PRINT_ERR( "MsgChannel::get_msg(): No message received from the scheduler.\n" );
+
+            return 1;
+        }
+
+        if( msg->type == M_MON_STATS )
+        {
+            const MonStatsMsg* statsMsg = dynamic_cast<MonStatsMsg*>(msg.get());
+
+            auto nodeInfo = std::move( NodeInfo::create( statsMsg->hostid, statsMsg->statmsg ) );
+
+            if( nodeInfo )
+            {
+                nodeList.push_back( std::move( nodeInfo ) );
+            }
+
+            continue;
+        }
+        else if( msg->type == M_END )
+        {
+            PRINT_ERR( "Received EndMsg. Scheduler has quit.\n" );
+
+            return 1;
+        }
+        else
+        {
+            PRINT_WARN( "Unknown message type: %d\n", msg->type );
+
+            continue;
+        }
+    }
+
+    if( nodeList.empty() )
+    {
+        PRINT_ERR( "No useful data received.\n" );
+
+        return 1;
+    }
+    else
+    {
+        if( brief )
+        {
+            uint32_t jobCount = 0;
+
+            for( const auto& node : nodeList )
+            {
+                if( !node->noRemote() && !node->isOffline() )
+                {
+                    jobCount += node->maxJobs();
+                }
+            }
+
+            printf( "%u\n", jobCount );
+        }
+        else
+        {
+            // <!> Dummy
+
+            PRINT_INFO( "%zu nodes found.\n", nodeList.size() );
+        }
+
+        return 0;
+    }
 }
