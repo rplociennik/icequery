@@ -2,7 +2,6 @@
 #include <memory>       // unique_ptr
 #include <algorithm>
 #include <vector>
-#include <utility>      // pair
 
 #include <ctime>        // clock_gettime()
 #include <cstring>      // strerror()
@@ -159,171 +158,6 @@ std::string& toLower( std::string& str )
     return str;
 }
 
-std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& header, const std::vector<std::string>& strings, bool plain, bool ascii )
-{
-    auto columnCount = header.size();
-    auto rowCount = strings.size() / columnCount;
-
-    std::vector<std::size_t> colMaxLens( columnCount );
-
-    std::unique_ptr<icu::Transliterator> trans;
-    std::vector<std::string> data( columnCount * ( rowCount + 1 ) );
-    std::vector<std::size_t> lens( columnCount * ( rowCount + 1 ) );
-
-    // Init Transliterator
-    if( ascii )
-    {
-        icu::ErrorCode errorCode;
-        trans.reset( icu::Transliterator::createInstance( "Latin-ASCII", UTRANS_FORWARD, errorCode ) );
-
-        if( errorCode.isFailure() )
-        {
-            PRINT_ERR( "icu::Transliterator::createInstance(): %s\n", errorCode.errorName() );
-            trans.reset();
-        }
-    }
-
-    // Convert to UnicodeString, transliterate if needed, determine column lengths and store back a string
-    for( std::size_t c = 0; c < columnCount; ++c )
-    {
-        for( std::size_t r = 0; r < rowCount + 1; ++r )
-        {
-            const std::string& origStr = r == 0 ? header[c].second : strings[columnCount * (r - 1) + c];
-            icu::UnicodeString uniStr( origStr.c_str() );
-
-            std::size_t& maxLen = colMaxLens[c];
-            std::size_t& len = lens[columnCount * r + c];
-            std::string& str = data[columnCount * r + c];
-
-            if( trans )
-            {
-                trans->transliterate( uniStr );
-
-                std::unique_ptr<char> buff( new char[uniStr.extract( 0, uniStr.length(), static_cast<char*>( NULL ) )] );
-
-                uniStr.extract( 0, uniStr.length(), buff.get() );
-                str.assign( buff.get() );
-            }
-            else
-            {
-                str.assign( origStr );
-            }
-
-            len = static_cast<std::size_t>( uniStr.length() );
-
-            // Add 1 char margin to the first and last column
-            if( !plain )
-            {
-                if( c == 0 )
-                {
-                    str.insert( 0, 1, ' ' );
-                    ++len;
-                }
-                else if( c == columnCount - 1 )
-                {
-                    str.append( 1, ' ' );
-                    ++len;
-                }
-            }
-
-            maxLen = std::max( maxLen, len );
-        }
-    }
-
-    // Pad the strings
-    for( std::size_t c = 0; c < columnCount; ++c )
-    {
-        const std::size_t& maxLen = colMaxLens[c];
-        const Alignment align = header[c].first;
-
-        for( std::size_t r = 0; r < rowCount + 1; ++r )
-        {
-            std::string& str = data[columnCount * r + c];
-            const std::size_t& strLen = lens[columnCount * r + c];
-
-            if( strLen < maxLen )
-            {
-                std::size_t lenDiff = maxLen - strLen;
-
-                switch( align )
-                {
-                    case Left:
-                        str.append( lenDiff, ' ' );
-                        break;
-
-                    case Right:
-                        str.insert( 0, lenDiff, ' ' );
-                        break;
-
-                    case Center:
-                        str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' );
-                        break;
-                }
-            }
-        }
-    }
-
-    // Render the table
-    std::string table;
-
-    for( std::size_t r = 0; r < rowCount + 1; ++r )
-    {
-        for( std::size_t c = 0; c < columnCount; ++c )
-        {
-            if( c > 0 )
-            {
-                if( plain )
-                {
-                   table.append( " " );
-                }
-                else
-                {
-                    if( ascii )
-                    {
-                        table.append( " " VERT_LINE_LO " " );
-                    }
-                    else
-                    {
-                        table.append( " " VERT_LINE_HI " " );
-                    }
-                }
-            }
-
-            table.append( data[columnCount * r + c] );
-        }
-
-        table.append( "\n" );
-
-        // Draw the horizontal line below the header
-        if( r == 0 && !plain )
-        {
-            for( std::size_t c = 0; c < columnCount; ++c )
-            {
-                if( c > 0 )
-                {
-                    if( ascii )
-                    {
-                        table.append( HOR_LINE_LO CROSS_LO HOR_LINE_LO );
-                    }
-                    else
-                    {
-                        table.append( HOR_LINE_HI CROSS_HI HOR_LINE_HI );
-                    }
-                }
-
-                for( std::size_t i = 0; i < colMaxLens[c]; ++i )
-                {
-                    table.append( ascii ? HOR_LINE_LO : HOR_LINE_HI );
-                }
-            }
-
-            table.append( "\n" );
-        }
-    }
-
-    return std::move( table );
-}
-
 // Classes
 
 class NodeInfo
@@ -401,6 +235,7 @@ public:
         return std::move( res );
     }
 
+public:
     uint32_t hostId() const
     {
         return m_hostId;
@@ -460,6 +295,226 @@ private:
     bool m_offline = false;
     std::string m_platform;
 };
+
+class ColumnHeader
+{
+public:
+    ColumnHeader( Alignment alignment, bool treatAsUnicode, const std::string& name )
+        : m_alignment( alignment )
+        , m_treatAsUnicode( treatAsUnicode )
+        , m_name( name )
+    {
+    }
+
+    ColumnHeader( Alignment alignment, bool treatAsUnicode, const std::string&& name )
+        : m_alignment( alignment )
+        , m_treatAsUnicode( treatAsUnicode )
+        , m_name( std::move( name ) )
+    {
+    }
+
+public:
+    Alignment alignment() const
+    {
+        return m_alignment;
+    }
+
+    bool treatAsUnicode() const
+    {
+        return m_treatAsUnicode;
+    }
+
+    const std::string& name() const
+    {
+        return m_name;
+    }
+
+private:
+    Alignment m_alignment;
+    bool m_treatAsUnicode;
+    std::string m_name;
+};
+
+// Other functions
+
+std::string renderTable( const std::vector<ColumnHeader>& header, const std::vector<std::string>& strings, bool plain, bool ascii )
+{
+    auto columnCount = header.size();
+    auto rowCount = strings.size() / columnCount;
+
+    std::vector<std::size_t> colMaxLens( columnCount );
+
+    std::unique_ptr<icu::Transliterator> trans;
+    std::vector<std::string> data( columnCount * ( rowCount + 1 ) );
+    std::vector<std::size_t> lens( columnCount * ( rowCount + 1 ) );
+
+    // Init Transliterator
+    if( ascii )
+    {
+        icu::ErrorCode errorCode;
+        trans.reset( icu::Transliterator::createInstance( "Latin-ASCII", UTRANS_FORWARD, errorCode ) );
+
+        if( errorCode.isFailure() )
+        {
+            PRINT_ERR( "icu::Transliterator::createInstance(): %s\n", errorCode.errorName() );
+            trans.reset();
+        }
+    }
+
+    // If needed, treat as UnicodeString and possibly transliterate,
+    // otherwise just determine column length and store back a string
+    for( std::size_t c = 0; c < columnCount; ++c )
+    {
+        std::size_t& maxLen = colMaxLens[c];
+
+        for( std::size_t r = 0; r < rowCount + 1; ++r )
+        {
+            std::size_t& len = lens[columnCount * r + c];
+            std::string& res = data[columnCount * r + c];
+
+            const std::string& origStr = r == 0 ? header[c].name() : strings[columnCount * (r - 1) + c];
+
+            if( header[c].treatAsUnicode() )
+            {
+                icu::UnicodeString uniStr( origStr.c_str() );
+
+                if( trans )
+                {
+                    trans->transliterate( uniStr );
+
+                    std::unique_ptr<char> buff( new char[uniStr.extract( 0, uniStr.length(), static_cast<char*>( NULL ) )] );
+
+                    uniStr.extract( 0, uniStr.length(), buff.get() );
+                    res.assign( buff.get() );
+                }
+                else
+                {
+                    res.assign( origStr );
+                }
+
+                len = static_cast<std::size_t>( uniStr.length() );
+            }
+            else
+            {
+                res.assign( origStr );
+                len = res.length();
+            }
+
+            // Add 1 char margin to the first and last column
+            if( !plain )
+            {
+                if( c == 0 )
+                {
+                    res.insert( 0, 1, ' ' );
+                    ++len;
+                }
+                else if( c == columnCount - 1 )
+                {
+                    res.append( 1, ' ' );
+                    ++len;
+                }
+            }
+
+            maxLen = std::max( maxLen, len );
+        }
+    }
+
+    // Pad the strings
+    for( std::size_t c = 0; c < columnCount; ++c )
+    {
+        const std::size_t& maxLen = colMaxLens[c];
+        const Alignment align = header[c].alignment();
+
+        for( std::size_t r = 0; r < rowCount + 1; ++r )
+        {
+            std::string& str = data[columnCount * r + c];
+            const std::size_t& len = lens[columnCount * r + c];
+
+            if( len < maxLen )
+            {
+                std::size_t lenDiff = maxLen - len;
+
+                switch( align )
+                {
+                    case Left:
+                        str.append( lenDiff, ' ' );
+                        break;
+
+                    case Right:
+                        str.insert( 0, lenDiff, ' ' );
+                        break;
+
+                    case Center:
+                        str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' );
+                        break;
+                }
+            }
+        }
+    }
+
+    // Render the table
+    std::string table;
+
+    std::size_t lensSum = std::accumulate( lens.cbegin(), lens.cend(), static_cast<std::size_t>( 0 ) );
+    table.reserve( ( lensSum + ( lensSum - 1 ) + 1 ) * ( plain ? 1 : 3 ) + 1 );
+
+    for( std::size_t r = 0; r < rowCount + 1; ++r )
+    {
+        for( std::size_t c = 0; c < columnCount; ++c )
+        {
+            if( c > 0 )
+            {
+                if( plain )
+                {
+                   table.append( 1, ' ' );
+                }
+                else
+                {
+                    if( ascii )
+                    {
+                        table.append( " " VERT_LINE_LO " " );
+                    }
+                    else
+                    {
+                        table.append( " " VERT_LINE_HI " " );
+                    }
+                }
+            }
+
+            table.append( data[columnCount * r + c] );
+        }
+
+        table.append( 1, '\n' );
+
+        // Draw the horizontal line below the header
+        if( r == 0 && !plain )
+        {
+            for( std::size_t c = 0; c < columnCount; ++c )
+            {
+                if( c > 0 )
+                {
+                    if( ascii )
+                    {
+                        table.append( HOR_LINE_LO CROSS_LO HOR_LINE_LO );
+                    }
+                    else
+                    {
+                        table.append( HOR_LINE_HI CROSS_HI HOR_LINE_HI );
+                    }
+                }
+
+                for( std::size_t i = 0; i < colMaxLens[c]; ++i )
+                {
+                    table.append( ascii ? HOR_LINE_LO : HOR_LINE_HI );
+                }
+            }
+
+            table.append( 1, '\n' );
+        }
+    }
+
+    return std::move( table );
+}
 
 // And the entry point...
 
@@ -715,35 +770,36 @@ int main( int argc, char** argv )
         }
         else
         {
-            std::vector<std::pair<Alignment, std::string>> header {
-                { Alignment::Right , "Node #" },
-                { Alignment::Center, "Offline?" },
-                { Alignment::Center, "No remote?" },
-                { Alignment::Left  , "Name" },
-                { Alignment::Left  , "IP" },
-                { Alignment::Right , "Cores" },
-                { Alignment::Left  , "Platform" }
-            };
-
-            std::vector<std::string> strings;
-
-            for( const auto& node : nodes )
-            {
-                if( ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ) )
-                {
-                    strings.emplace_back( std::to_string( node->hostId() ) );
-                    strings.emplace_back( node->isOffline() ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
-                    strings.emplace_back( node->noRemote()  ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
-                    strings.push_back( node->name() );
-                    strings.push_back( node->ip() );
-                    strings.emplace_back( std::to_string( node->maxJobs() ) );
-                    strings.push_back( node->platform() );
-                }
-            }
-
             if( !noTable )
             {
-               printf( "\n%s\n", renderTable( header, strings, plain, ascii ).c_str() );
+                const std::vector<ColumnHeader> header {
+                    { Alignment::Right , false, "Node #"     },
+                    { Alignment::Center, true,  "Offline?"   },
+                    { Alignment::Center, true,  "No remote?" },
+                    { Alignment::Left  , true,  "Name"       },
+                    { Alignment::Left  , false, "IP"         },
+                    { Alignment::Right , false, "Cores"      },
+                    { Alignment::Left  , false, "Platform"   }
+                };
+
+                std::vector<std::string> strings;
+                strings.reserve( nodeCount * header.size() );
+
+                for( const auto& node : nodes )
+                {
+                    if( ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ) )
+                    {
+                        strings.emplace_back( std::to_string( node->hostId() ) );
+                        strings.emplace_back( node->isOffline() ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
+                        strings.emplace_back( node->noRemote()  ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
+                        strings.push_back( node->name() );
+                        strings.push_back( node->ip() );
+                        strings.emplace_back( std::to_string( node->maxJobs() ) );
+                        strings.push_back( node->platform() );
+                    }
+                }
+
+                printf( "\n%s\n", renderTable( header, strings, plain, ascii ).c_str() );
             }
 
             printf( "%u node%s, %u core%s total.\n", nodeCount, nodeCount == 1 ? "" : "s", coreCount, coreCount == 1 ? "" : "s" );
