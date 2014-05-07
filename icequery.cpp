@@ -20,18 +20,19 @@
 
 // Utility macros
 
-#define PRINT_BASE( format, args... ) \
+#define PRINT_BASE( neverSuppress, format, args... ) \
     do \
     { \
-        if( !veryQuiet ) \
+        if( !veryQuiet || neverSuppress ) \
         { \
             fprintf( stderr, format, ##args ); \
         } \
     } \
     while( 0 )
 
-#define PRINT_ERR( format, args... )    PRINT_BASE( "\e[31m" format "\e[0m", ##args )
-#define PRINT_WARN( format, args... )   PRINT_BASE( "\e[1;33m" format "\e[0m", ##args )
+#define PRINT_ERR( format, args... )        PRINT_BASE( false, "\e[31m" format "\e[0m", ##args )
+#define PRINT_WARN( format, args... )       PRINT_BASE( false, "\e[1;33m" format "\e[0m", ##args )
+#define PRINT_DEBUG( format, args... )      PRINT_BASE( debug,  "\e[1;36m" format "\e[0m", ##args )
 
 // Const macros
 
@@ -83,6 +84,8 @@ bool ascii = false;
 bool noOffline = false;
 bool noNoRemote = false;
 
+bool debug = false;
+
 // Consts
 
 const char* UsageStr = R"usage(
@@ -123,6 +126,10 @@ Table options:
 
  [*] Selected options affect the display of the table only, as neither offline
      nor 'no remote' nodes are taken into account when calculating totals.
+
+Debug options:
+
+     --debug           : print debug output as well
 
 Exit codes:
 
@@ -545,6 +552,9 @@ int main( int argc, char** argv )
 
             { "no-offline",  no_argument,       0,  3  },
             { "no-noremote", no_argument,       0,  4  },
+
+            { "debug",       no_argument,       0,  13 },
+
             { 0,             0,                 0,  0  }
         };
 
@@ -628,6 +638,10 @@ int main( int argc, char** argv )
             case 4: // no-noremote
                 noNoRemote = true;
                 break;
+
+            case 13: // debug
+                debug = true;
+                break;
         }
     }
 
@@ -678,65 +692,73 @@ int main( int argc, char** argv )
 
     struct pollfd pollData { channel->fd, POLLIN | POLLPRI, 0 };
 
-    int pollRes = poll( &pollData, 1, timeout );
-
-    if( pollRes < 0 )
-    {
-        int lastErrno = errno;
-
-        PRINT_ERR( "poll(): (%d) %s\n", lastErrno, strerror( lastErrno ) );
-
-        return EXIT_CONNECTION_ERR;
-    }
-    else if( pollRes == 0 )
-    {
-        PRINT_ERR( "poll(): Timed out white awaiting response from the scheduler.\n" );
-
-        return EXIT_CONNECTION_ERR;
-    }
-
     std::vector<std::unique_ptr<NodeInfo>> nodes;
     uint32_t hostIdMax = 0;
 
-    while( !channel->read_a_bit() || channel->has_msg() )
+    int pollRes;
+
+    do
     {
-        std::unique_ptr<Msg> msg( channel->get_msg() );
+        pollRes = poll( &pollData, 1, timeout );
 
-        if( !msg )
+        if( pollRes < 0 )
         {
-            PRINT_ERR( "MsgChannel::get_msg(): No message received from the scheduler.\n" );
+            int lastErrno = errno;
+
+            PRINT_ERR( "poll(): (%d) %s\n", lastErrno, strerror( lastErrno ) );
 
             return EXIT_CONNECTION_ERR;
         }
-
-        if( msg->type == M_MON_STATS )
+        else if( pollRes > 0 )
         {
-            const MonStatsMsg* statsMsg = dynamic_cast<MonStatsMsg*>(msg.get());
-
-            auto nodeInfo = std::move( NodeInfo::create( statsMsg->hostid, statsMsg->statmsg ) );
-
-            if( nodeInfo && nodeInfo->hostId() > hostIdMax)
+            while( !channel->read_a_bit() || channel->has_msg() )
             {
-                // Keep track of highest hostId in case the scheduler sends multiple copies of the same hostInfos
-                hostIdMax = nodeInfo->hostId();
-                nodes.push_back( std::move( nodeInfo ) );
+                std::unique_ptr<Msg> msg( channel->get_msg() );
+
+                if( !msg )
+                {
+                    PRINT_ERR( "MsgChannel::get_msg(): No message received from the scheduler.\n" );
+
+                    return EXIT_CONNECTION_ERR;
+                }
+
+                if( msg->type == M_MON_STATS )
+                {
+                    const MonStatsMsg* statsMsg = dynamic_cast<MonStatsMsg*>(msg.get());
+
+                    if( debug )
+                    {
+                        static uint32_t msgNo = 1;
+
+                        PRINT_DEBUG( "Message %u:\n%s\n", msgNo++, statsMsg->statmsg.c_str() );
+                    }
+
+                    auto nodeInfo = std::move( NodeInfo::create( statsMsg->hostid, statsMsg->statmsg ) );
+
+                    if( nodeInfo && nodeInfo->hostId() > hostIdMax)
+                    {
+                        // Keep track of highest hostId in case the scheduler sends multiple copies of the same hostInfos
+                        hostIdMax = nodeInfo->hostId();
+                        nodes.push_back( std::move( nodeInfo ) );
+                    }
+
+                    continue;
+                }
+                else if( msg->type == M_END )
+                {
+                    PRINT_ERR( "Received EndMsg. Scheduler has quit.\n" );
+
+                    return EXIT_CONNECTION_ERR;
+                }
+                else if( debug )
+                {
+                    PRINT_DEBUG( "Ignored message type: %d\n", msg->type );
+
+                    continue;
+                }
             }
-
-            continue;
         }
-        else if( msg->type == M_END )
-        {
-            PRINT_ERR( "Received EndMsg. Scheduler has quit.\n" );
-
-            return EXIT_CONNECTION_ERR;
-        }
-        else
-        {
-            PRINT_WARN( "Unknown message type: %d\n", msg->type );
-
-            continue;
-        }
-    }
+    } while( pollRes != 0 );
 
     if( nodes.empty() ||
         std::all_of( nodes.cbegin(), nodes.cend(), [] ( const std::unique_ptr<NodeInfo>& node ) -> bool
