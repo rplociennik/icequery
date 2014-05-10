@@ -13,6 +13,8 @@
 #include <icecc/comm.h>
 #include <icecc/logging.h>
 
+#include <unicode/unistr.h> // UnicodeString
+
 // Utility macros
 
 #define PRINT_BASE( format, args... ) \
@@ -27,7 +29,6 @@
 
 #define PRINT_ERR( format, args... )    PRINT_BASE( "\e[31m" format "\e[0m", ##args )
 #define PRINT_WARN( format, args... )   PRINT_BASE( "\e[33m" format "\e[0m", ##args )
-#define PRINT_INFO( format, args... )   PRINT_BASE( "\e[32m" format "\e[0m", ##args )
 
 // Const macros
 
@@ -137,7 +138,7 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
                 }
             }
 
-            auto strLen = str.length();
+            std::size_t strLen = UnicodeString( str.c_str() ).length();
 
             if( strLen == len )
             {
@@ -451,10 +452,10 @@ int main( void )
 
             auto nodeInfo = std::move( NodeInfo::create( statsMsg->hostid, statsMsg->statmsg ) );
 
-            if( nodeInfo )
+            if( nodeInfo && nodeInfo->hostId() > hostIdMax)
             {
                 // Keep track of highest hostId in case the scheduler sends multiple copies of the same hostInfos
-                hostIdMax = std::max( hostIdMax, nodeInfo->hostId() );
+                hostIdMax = nodeInfo->hostId();
                 nodes.push_back( std::move( nodeInfo ) );
             }
 
@@ -529,7 +530,7 @@ int main( void )
                printf( "\n%s\n", renderTable( header, strings, plain, lowAscii ).c_str() );
             }
 
-            PRINT_INFO( "%zu nodes, %u cores total.\n", nodes.size(), cores );
+            printf( "%zu nodes, %u cores total.\n", nodes.size(), cores );
         }
 
         return 0;
