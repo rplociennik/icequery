@@ -67,14 +67,14 @@ long getTimestamp()
 
 std::string toLower( std::string&& str )
 {
-    std::transform( str.begin(), str.end(), str.begin(), tolower );
+    std::transform( str.cbegin(), str.cend(), str.begin(), tolower );
 
     return std::move( str );
 }
 
 std::string& toLower( std::string& str )
 {
-    std::transform( str.begin(), str.end(), str.begin(), tolower );
+    std::transform( str.cbegin(), str.cend(), str.begin(), tolower );
 
     return str;
 }
@@ -146,18 +146,20 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
             }
             else
             {
+                auto lenDiff = len - strLen;
+
                 switch( align )
                 {
                     case Left:
-                        data[columnCount * r + c] = std::move( str.append( len - strLen, ' ' ) );
+                        data[columnCount * r + c] = std::move( str.append( lenDiff, ' ' ) );
                         break;
 
                     case Right:
-                        data[columnCount * r + c] = std::move( str.insert( 0, len - strLen, ' ' ) );
+                        data[columnCount * r + c] = std::move( str.insert( 0, lenDiff, ' ' ) );
                         break;
 
                     case Center:
-                        data[columnCount * r + c] = std::move( str.append( ( len - strLen ) / 2, ' ' ).insert( 0, ( len - strLen ) - ( len - strLen ) / 2, ' ' ) );
+                        data[columnCount * r + c] = std::move( str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' ) );
                         break;
                 }
             }
@@ -299,7 +301,7 @@ public:
             res.reset( nullptr );
         }
 
-        return res;
+        return std::move( res );
     }
 
     uint32_t hostId() const
@@ -332,7 +334,7 @@ public:
         return m_offline;
     }
 
-    const std::string platform() const
+    const std::string& platform() const
     {
         return m_platform;
     }
@@ -375,10 +377,12 @@ int main( void )
     const bool noTable = false;
     const bool plain = false;
     const bool lowAscii = false;
+    const bool filterOffline = false;
+    const bool filterNoRemote = false;
 
-    // This somehow suppresses all the internal debug messages sent onto stderr by icecc
     if( quiet )
     {
+        // This somehow suppresses all the internal debug messages sent onto stderr by icecc
         reset_debug( 0 );
     }
 
@@ -475,7 +479,11 @@ int main( void )
         }
     }
 
-    if( nodes.empty() )
+    if( nodes.empty() ||
+        std::all_of( nodes.cbegin(), nodes.cend(), [filterOffline, filterNoRemote] ( const auto& node ) -> bool
+        {
+            return ( filterOffline && node->isOffline() ) || ( filterNoRemote && node->noRemote() );
+        } ) )
     {
         PRINT_ERR( "No useful data received.\n" );
 
@@ -483,19 +491,23 @@ int main( void )
     }
     else
     {
-        uint32_t cores = 0;
-
-        for( const auto& node : nodes )
+        std::uint32_t coreCount = std::accumulate( nodes.cbegin(), nodes.cend(), static_cast<std::uint32_t>( 0 ), [] ( std::uint32_t count, const auto& node )
         {
             if( !node->noRemote() && !node->isOffline() )
             {
-                cores += node->maxJobs();
+                return count + node->maxJobs();
             }
-        }
+            else
+            {
+                return count;
+            }
+        } );
+
+        std::uint32_t nodeCount = std::count_if( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) { return !node->isOffline(); } );
 
         if( brief )
         {
-            printf( "%u\n", cores );
+            printf( "%u\n", coreCount );
         }
         else
         {
@@ -509,20 +521,20 @@ int main( void )
                 { Alignment::Left  , "Platform" }
             };
 
-            // std:vector<std::string> data( header.size() * nodes.size() );
-            // std::size_t i = 0;
-
             std::vector<std::string> strings;
 
             for( const auto& node : nodes )
             {
-                strings.emplace_back( std::to_string( node->hostId() ) );
-                strings.emplace_back( node->isOffline() ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
-                strings.emplace_back( node->noRemote()  ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
-                strings.push_back( node->name() );
-                strings.push_back( node->ip() );
-                strings.emplace_back( std::to_string( node->maxJobs() ) );
-                strings.push_back( node->platform() );
+                if( ( !filterOffline || !node->isOffline() ) && ( !filterNoRemote || !node->noRemote() ) )
+                {
+                    strings.emplace_back( std::to_string( node->hostId() ) );
+                    strings.emplace_back( node->isOffline() ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
+                    strings.emplace_back( node->noRemote()  ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
+                    strings.push_back( node->name() );
+                    strings.push_back( node->ip() );
+                    strings.emplace_back( std::to_string( node->maxJobs() ) );
+                    strings.push_back( node->platform() );
+                }
             }
 
             if( !noTable )
@@ -530,7 +542,7 @@ int main( void )
                printf( "\n%s\n", renderTable( header, strings, plain, lowAscii ).c_str() );
             }
 
-            printf( "%zu nodes, %u cores total.\n", nodes.size(), cores );
+            printf( "%u nodes, %u cores total.\n", nodeCount, coreCount );
         }
 
         return 0;
