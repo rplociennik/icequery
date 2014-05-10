@@ -13,7 +13,9 @@
 #include <icecc/comm.h>
 #include <icecc/logging.h>
 
-#include <unicode/unistr.h> // UnicodeString
+#include <unicode/unistr.h>     // UnicodeString
+#include <unicode/translit.h>   // Transliterator
+#include <unicode/errorcode.h>  // ErrorCode
 
 // Utility macros
 
@@ -28,7 +30,7 @@
     while( 0 )
 
 #define PRINT_ERR( format, args... )    PRINT_BASE( "\e[31m" format "\e[0m", ##args )
-#define PRINT_WARN( format, args... )   PRINT_BASE( "\e[33m" format "\e[0m", ##args )
+#define PRINT_WARN( format, args... )   PRINT_BASE( "\e[1;33m" format "\e[0m", ##args )
 
 // Const macros
 
@@ -53,6 +55,23 @@ enum Alignment
     Right,
     Center
 };
+
+// Global variables
+
+std::string netName = "ICECREAM";
+int timeout = 2000;
+std::string schedIp = "";
+int schedPort = 0;
+
+bool quiet = false;
+bool brief = true;
+
+bool noTable = true;
+bool plain = false;
+bool lowAscii = false;
+
+bool filterOffline = false;
+bool filterNoRemote = false;
 
 // Utility functions
 
@@ -84,46 +103,52 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
     auto columnCount = header.size();
     auto rowCount = strings.size() / columnCount;
 
-    std::vector<std::size_t> lengths( columnCount );
+    std::vector<std::size_t> colMaxLens( columnCount );
+
+    std::unique_ptr<Transliterator> trans;
     std::vector<std::string> data( columnCount * ( rowCount + 1 ) );
+    std::vector<std::size_t> lens( columnCount * ( rowCount + 1 ) );
 
-    // Determine column lengths
-    for( std::size_t c = 0; c < columnCount; ++c )
+    // Init Transliterator
+    if( useLowAscii )
     {
-        auto l = header[c].second.length();
+        ErrorCode errorCode;
+        trans.reset( Transliterator::createInstance( "Latin-ASCII", UTRANS_FORWARD, errorCode ) );
 
-        // Add 1 char margin to the first and last column
-        if( !plain && ( c == 0 || c == columnCount - 1 ) )
+        if( errorCode.isFailure() )
         {
-            ++l;
+            PRINT_ERR( "Transliterator::createInstance(): %s\n", errorCode.errorName() );
+            trans.reset();
         }
-
-        for( std::size_t r = 0; r < rowCount; ++r )
-        {
-            l = std::max( l, strings[columnCount * r + c].length() );
-        }
-
-        lengths[c] = l;
     }
 
-    // Pad the strings
+    // Convert to UnicodeString, transliterate if needed, determine column lengths and store back a string
     for( std::size_t c = 0; c < columnCount; ++c )
     {
-        const auto len = lengths[c];
-        const Alignment align = header[c].first;
-
         for( std::size_t r = 0; r < rowCount + 1; ++r )
         {
-            std::string str;
+            const std::string& origStr = r == 0 ? header[c].second : strings[columnCount * (r - 1) + c];
+            UnicodeString uniStr( origStr.c_str() );
 
-            if( r == 0 )
+            std::size_t& maxLen = colMaxLens[c];
+            std::size_t& len = lens[columnCount * r + c];
+            std::string& str = data[columnCount * r + c];
+
+            if( trans )
             {
-                str = header[c].second;
+                trans->transliterate( uniStr );
+
+                std::unique_ptr<char> buff( new char[uniStr.extract( 0, uniStr.length(), static_cast<char*>( NULL ) )] );
+
+                uniStr.extract( 0, uniStr.length(), buff.get() );
+                str.assign( buff.get() );
             }
             else
             {
-                str = strings[columnCount * (r - 1) + c];
+                str.assign( origStr );
             }
+
+            len = static_cast<std::size_t>( uniStr.length() );
 
             // Add 1 char margin to the first and last column
             if( !plain )
@@ -131,35 +156,46 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
                 if( c == 0 )
                 {
                     str.insert( 0, 1, ' ' );
+                    ++len;
                 }
                 else if( c == columnCount - 1 )
                 {
                     str.append( 1, ' ' );
+                    ++len;
                 }
             }
 
-            std::size_t strLen = UnicodeString( str.c_str() ).length();
+            maxLen = std::max( maxLen, len );
+        }
+    }
 
-            if( strLen == len )
+    // Pad the strings
+    for( std::size_t c = 0; c < columnCount; ++c )
+    {
+        const std::size_t& maxLen = colMaxLens[c];
+        const Alignment align = header[c].first;
+
+        for( std::size_t r = 0; r < rowCount + 1; ++r )
+        {
+            std::string& str = data[columnCount * r + c];
+            const std::size_t& strLen = lens[columnCount * r + c];
+
+            if( strLen < maxLen )
             {
-                data[columnCount * r + c] = std::move( str );
-            }
-            else
-            {
-                auto lenDiff = len - strLen;
+                std::size_t lenDiff = maxLen - strLen;
 
                 switch( align )
                 {
                     case Left:
-                        data[columnCount * r + c] = std::move( str.append( lenDiff, ' ' ) );
+                        str.append( lenDiff, ' ' );
                         break;
 
                     case Right:
-                        data[columnCount * r + c] = std::move( str.insert( 0, lenDiff, ' ' ) );
+                        str.insert( 0, lenDiff, ' ' );
                         break;
 
                     case Center:
-                        data[columnCount * r + c] = std::move( str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' ) );
+                        str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' );
                         break;
                 }
             }
@@ -214,7 +250,7 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
                     }
                 }
 
-                for( std::size_t i = 0; i < lengths[c]; ++i )
+                for( std::size_t i = 0; i < colMaxLens[c]; ++i )
                 {
                     table.append( useLowAscii ? HOR_LINE_LO : HOR_LINE_HI );
                 }
@@ -298,7 +334,7 @@ public:
 
         if( !res->isValid() )
         {
-            res.reset( nullptr );
+            res.reset();
         }
 
         return std::move( res );
@@ -368,18 +404,6 @@ private:
 
 int main( void )
 {
-    const char* netName = "ICECREAM";
-    const int timeout = 2000;
-    const char* schedIp = "";
-    const int schedPort = 0;
-    const bool quiet = false;
-    const bool brief = false;
-    const bool noTable = false;
-    const bool plain = false;
-    const bool lowAscii = false;
-    const bool filterOffline = false;
-    const bool filterNoRemote = false;
-
     if( quiet )
     {
         // This somehow suppresses all the internal debug messages sent onto stderr by icecc
@@ -480,7 +504,7 @@ int main( void )
     }
 
     if( nodes.empty() ||
-        std::all_of( nodes.cbegin(), nodes.cend(), [filterOffline, filterNoRemote] ( const auto& node ) -> bool
+        std::all_of( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) -> bool
         {
             return ( filterOffline && node->isOffline() ) || ( filterNoRemote && node->noRemote() );
         } ) )
