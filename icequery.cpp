@@ -739,7 +739,7 @@ int main( int argc, char** argv )
     }
 
     if( nodes.empty() ||
-        std::all_of( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) -> bool
+        std::all_of( nodes.cbegin(), nodes.cend(), [] ( const std::unique_ptr<NodeInfo>& node ) -> bool
         {
             return ( noOffline && node->isOffline() ) || ( noNoRemote && node->noRemote() );
         } ) )
@@ -750,7 +750,7 @@ int main( int argc, char** argv )
     }
     else
     {
-        std::uint32_t coreCount = std::accumulate( nodes.cbegin(), nodes.cend(), static_cast<std::uint32_t>( 0 ), [] ( std::uint32_t count, const auto& node )
+        std::uint32_t coreCount = std::accumulate( nodes.cbegin(), nodes.cend(), static_cast<std::uint32_t>( 0 ), [] ( std::uint32_t count, const std::unique_ptr<NodeInfo>& node )
         {
             if( !node->noRemote() && !node->isOffline() )
             {
@@ -762,7 +762,7 @@ int main( int argc, char** argv )
             }
         } );
 
-        std::uint32_t nodeCount = std::count_if( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) { return ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ); } );
+        std::uint32_t nodeCount = std::count_if( nodes.cbegin(), nodes.cend(), [] ( const std::unique_ptr<NodeInfo>& node ) { return ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ); } );
 
         if( brief )
         {
