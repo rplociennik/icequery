@@ -20,19 +20,23 @@
 
 // Utility macros
 
-#define PRINT_BASE( neverSuppress, format, args... ) \
+#define PRINT_BASE( shouldPrint, format, args... ) \
     do \
     { \
-        if( !veryQuiet || neverSuppress ) \
+        if( !veryQuiet && shouldPrint ) \
         { \
             fprintf( stderr, format, ##args ); \
         } \
     } \
     while( 0 )
 
-#define PRINT_ERR( format, args... )        PRINT_BASE( false, "\e[31m" format "\e[0m", ##args )
-#define PRINT_WARN( format, args... )       PRINT_BASE( false, "\e[1;33m" format "\e[0m", ##args )
+#define PRINT_INFO( format, args... )       PRINT_BASE( true,  "\e[1;32m" format "\e[0m", ##args )
+#define PRINT_WARN( format, args... )       PRINT_BASE( true,  "\e[1;33m" format "\e[0m", ##args )
+#define PRINT_ERR( format, args... )        PRINT_BASE( true,  "\e[31m" format "\e[0m", ##args )
 #define PRINT_DEBUG( format, args... )      PRINT_BASE( debug,  "\e[1;36m" format "\e[0m", ##args )
+
+#define STR_INTERNAL( x )                   #x
+#define STR( x )                            STR_INTERNAL( x )
 
 // Const macros
 
@@ -57,6 +61,11 @@
 #define EXIT_CONNECTION_ERR 2
 #define EXIT_NO_DATA        3
 
+// Other consts
+
+#define TIMEOUT_DEFAULT             2000
+#define USELESS_POLLS_IN_A_ROW_MAX  5
+
 // Types
 
 enum Alignment
@@ -69,7 +78,7 @@ enum Alignment
 // Global variables
 
 std::string netName;
-int timeout = 2000;
+int timeout = TIMEOUT_DEFAULT;
 std::string schedAddr;
 uint16_t schedPort = 0;
 
@@ -93,13 +102,14 @@ usage: %s [options...]
 
 General options:
 
- -h, --help            : displays this info
+ -h, --help            : display this info
+     --debug           : print debug output during execution
 
 Connection options:
 
  -n, --net-name=<name> : net name to use when connecting to the scheduler
  -t, --timeout=<msecs> : timeout for establishing connection and retrieving
-                         data (default: 2000)
+                         a single message from the scheduler (default: )usage" STR( TIMEOUT_DEFAULT ) R"usage()
      --addr=<address>  : scheduler address for avoiding broadcasting and
                          attempting to connect directly
      --port=<port>     : scheduler port for direct connection
@@ -126,10 +136,6 @@ Table options:
 
  [*] Selected options affect the display of the table only, as neither offline
      nor 'no remote' nodes are taken into account when calculating totals.
-
-Debug options:
-
-     --debug           : print debug output as well
 
 Exit codes:
 
@@ -658,6 +664,8 @@ int main( int argc, char** argv )
 
     long channelTimestamp = getTimestamp();
 
+    PRINT_INFO( "Attempting to connect to the scheduler...\n" );
+
     do
     {
         channel.reset( discover->try_get_scheduler() );
@@ -678,6 +686,7 @@ int main( int argc, char** argv )
     if( !channel )
     {
         PRINT_ERR( "Timed out while trying to connect to the scheduler.\n" );
+
         return EXIT_CONNECTION_ERR;
     }
 
@@ -690,16 +699,21 @@ int main( int argc, char** argv )
         return EXIT_CONNECTION_ERR;
     }
 
+    PRINT_INFO( "Retrieving messages...\n" );
+
     struct pollfd pollData { channel->fd, POLLIN | POLLPRI, 0 };
 
     std::vector<std::unique_ptr<NodeInfo>> nodes;
     uint32_t hostIdMax = 0;
 
     int pollRes;
+    int uselessPollsInARow = 0;
 
     do
     {
         pollRes = poll( &pollData, 1, timeout );
+        bool wasPollUseful = false;
+        static uint32_t msgNo = 0;
 
         if( pollRes < 0 )
         {
@@ -722,16 +736,14 @@ int main( int argc, char** argv )
                     return EXIT_CONNECTION_ERR;
                 }
 
+                bool isMsgUseful = false;
+                ++msgNo;
+
                 if( msg->type == M_MON_STATS )
                 {
                     const MonStatsMsg* statsMsg = dynamic_cast<MonStatsMsg*>(msg.get());
 
-                    if( debug )
-                    {
-                        static uint32_t msgNo = 1;
-
-                        PRINT_DEBUG( "Message %u:\n%s\n", msgNo++, statsMsg->statmsg.c_str() );
-                    }
+                    PRINT_DEBUG( "\nMessage %u:\n-\n%s-\n", msgNo, statsMsg->statmsg.c_str() );
 
                     auto nodeInfo = std::move( NodeInfo::create( statsMsg->hostid, statsMsg->statmsg ) );
 
@@ -740,25 +752,32 @@ int main( int argc, char** argv )
                         // Keep track of highest hostId in case the scheduler sends multiple copies of the same hostInfos
                         hostIdMax = nodeInfo->hostId();
                         nodes.push_back( std::move( nodeInfo ) );
+                        wasPollUseful |= ( isMsgUseful = true );
                     }
-
-                    continue;
                 }
                 else if( msg->type == M_END )
                 {
-                    PRINT_ERR( "Received EndMsg. Scheduler has quit.\n" );
+                    PRINT_ERR( "Received 'EndMsg'. Scheduler has quit.\n" );
 
                     return EXIT_CONNECTION_ERR;
                 }
-                else if( debug )
+                else
                 {
-                    PRINT_DEBUG( "Ignored message type: %d\n", msg->type );
+                    PRINT_DEBUG( "Message %u of type %d ignored\n", msgNo, msg->type );
+                }
 
-                    continue;
+                if( !isMsgUseful )
+                {
+                    PRINT_DEBUG( "Message %u considered useless\n", msgNo );
                 }
             }
+
+            if( !wasPollUseful )
+            {
+                ++uselessPollsInARow;
+            }
         }
-    } while( pollRes != 0 );
+    } while( pollRes != 0 && uselessPollsInARow < USELESS_POLLS_IN_A_ROW_MAX );
 
     if( nodes.empty() ||
         std::all_of( nodes.cbegin(), nodes.cend(), [] ( const std::unique_ptr<NodeInfo>& node ) -> bool
