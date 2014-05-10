@@ -64,7 +64,7 @@
 // Other consts
 
 #define TIMEOUT_DEFAULT             2000
-#define USELESS_POLLS_IN_A_ROW_MAX  5
+#define USELESS_POLLS_IN_A_ROW_MAX  3
 
 // Types
 
@@ -775,6 +775,10 @@ int main( int argc, char** argv )
             if( !wasPollUseful )
             {
                 ++uselessPollsInARow;
+            }
+            else
+            {
+                uselessPollsInARow = 0;
             }
         }
     } while( pollRes != 0 && uselessPollsInARow < USELESS_POLLS_IN_A_ROW_MAX );
