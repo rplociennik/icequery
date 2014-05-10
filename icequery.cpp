@@ -1,28 +1,30 @@
 #include <cstdio>
 #include <memory>       // unique_ptr
-#include <ctime>        // clock_gettime()
-#include <cstring>      // strerror()
-#include <cstdint>      // uint32_t
-#include <algorithm>    // transform()
-#include <cctype>       // tolower
+#include <algorithm>
 #include <vector>
 #include <utility>      // pair
 
+#include <ctime>        // clock_gettime()
+#include <cstring>      // strerror()
+#include <cstdint>      // uint32_t
+#include <cctype>       // tolower
+
 #include <poll.h>
+#include <getopt.h>
 
 #include <icecc/comm.h>
 #include <icecc/logging.h>
 
-#include <unicode/unistr.h>     // UnicodeString
-#include <unicode/translit.h>   // Transliterator
-#include <unicode/errorcode.h>  // ErrorCode
+#include <unicode/unistr.h>     // icu::UnicodeString
+#include <unicode/translit.h>   // icu::Transliterator
+#include <unicode/errorcode.h>  // icu::ErrorCode
 
 // Utility macros
 
 #define PRINT_BASE( format, args... ) \
     do \
     { \
-        if( !quiet ) \
+        if( !veryQuiet ) \
         { \
             fprintf( stderr, format, ##args ); \
         } \
@@ -47,6 +49,14 @@
 #define NO_TICK_HI      ""
 #define NO_TICK_LO      ""
 
+// Exit codes
+
+#define EXIT_OK             0
+
+#define EXIT_INVALID_ARGS   1
+#define EXIT_CONNECTION_ERR 2
+#define EXIT_NO_DATA        3
+
 // Types
 
 enum Alignment
@@ -58,20 +68,71 @@ enum Alignment
 
 // Global variables
 
-std::string netName = "ICECREAM";
+std::string netName;
 int timeout = 2000;
-std::string schedIp = "";
-int schedPort = 0;
+std::string schedAddr;
+uint16_t schedPort = 0;
 
 bool quiet = false;
-bool brief = true;
+bool veryQuiet = false;
+bool brief = false;
 
-bool noTable = true;
+bool noTable = false;
 bool plain = false;
-bool lowAscii = false;
+bool ascii = false;
 
-bool filterOffline = false;
-bool filterNoRemote = false;
+bool noOffline = false;
+bool noNoRemote = false;
+
+// Consts
+
+const char* UsageStr = R"usage(
+usage: %s [options...]
+
+General options:
+
+ -h, --help            : displays this info
+
+Connection options:
+
+ -n, --net-name=<name> : net name to use when connecting to the scheduler
+ -t, --timeout=<msecs> : timeout for establishing connection and retrieving
+                         data (default: 2000)
+     --addr=<address>  : scheduler address for avoiding broadcasting and
+                         attempting to connect directly
+     --port=<port>     : scheduler port for direct connection
+
+General output options:
+
+ -q, --quiet           : suppress any icecc debug messages sent to stderr
+ -Q, --very-quiet      : suppress all error messages entirely
+ -b, --brief           : on success return only a single numeric value
+                         representing the number of available cores
+                         (implies --very-quiet, --no-table)
+
+Table options:
+
+ -P, --plain           : print the table without any borders
+ -A, --ascii           : produce only ASCII output by displaying table borders
+                         as low order ASCII characters and performing
+                         transliteration on any names encountered
+ -T, --no-table        : do not print the table entirely, only a summary on
+                         success
+
+ --no-offline  [*]     : do not include offline nodes in the table
+ --no-noremote [*]     : do not include 'no remote' nodes in the table
+
+ [*] Selected options affect the display of the table only, as neither offline
+     nor 'no remote' nodes are taken into account when calculating totals.
+
+Exit codes:
+
+ 0 : No errors occurred
+
+ 1 : Command-line error
+ 2 : Connection error
+ 3 : No useful data retrieved
+)usage";
 
 // Utility functions
 
@@ -98,26 +159,26 @@ std::string& toLower( std::string& str )
     return str;
 }
 
-std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& header, const std::vector<std::string>& strings, bool plain, bool useLowAscii )
+std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& header, const std::vector<std::string>& strings, bool plain, bool ascii )
 {
     auto columnCount = header.size();
     auto rowCount = strings.size() / columnCount;
 
     std::vector<std::size_t> colMaxLens( columnCount );
 
-    std::unique_ptr<Transliterator> trans;
+    std::unique_ptr<icu::Transliterator> trans;
     std::vector<std::string> data( columnCount * ( rowCount + 1 ) );
     std::vector<std::size_t> lens( columnCount * ( rowCount + 1 ) );
 
     // Init Transliterator
-    if( useLowAscii )
+    if( ascii )
     {
-        ErrorCode errorCode;
-        trans.reset( Transliterator::createInstance( "Latin-ASCII", UTRANS_FORWARD, errorCode ) );
+        icu::ErrorCode errorCode;
+        trans.reset( icu::Transliterator::createInstance( "Latin-ASCII", UTRANS_FORWARD, errorCode ) );
 
         if( errorCode.isFailure() )
         {
-            PRINT_ERR( "Transliterator::createInstance(): %s\n", errorCode.errorName() );
+            PRINT_ERR( "icu::Transliterator::createInstance(): %s\n", errorCode.errorName() );
             trans.reset();
         }
     }
@@ -128,7 +189,7 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
         for( std::size_t r = 0; r < rowCount + 1; ++r )
         {
             const std::string& origStr = r == 0 ? header[c].second : strings[columnCount * (r - 1) + c];
-            UnicodeString uniStr( origStr.c_str() );
+            icu::UnicodeString uniStr( origStr.c_str() );
 
             std::size_t& maxLen = colMaxLens[c];
             std::size_t& len = lens[columnCount * r + c];
@@ -217,7 +278,7 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
                 }
                 else
                 {
-                    if( useLowAscii )
+                    if( ascii )
                     {
                         table.append( " " VERT_LINE_LO " " );
                     }
@@ -240,7 +301,7 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
             {
                 if( c > 0 )
                 {
-                    if( useLowAscii )
+                    if( ascii )
                     {
                         table.append( HOR_LINE_LO CROSS_LO HOR_LINE_LO );
                     }
@@ -252,7 +313,7 @@ std::string renderTable( const std::vector<std::pair<Alignment, std::string>>& h
 
                 for( std::size_t i = 0; i < colMaxLens[c]; ++i )
                 {
-                    table.append( useLowAscii ? HOR_LINE_LO : HOR_LINE_HI );
+                    table.append( ascii ? HOR_LINE_LO : HOR_LINE_HI );
                 }
             }
 
@@ -402,8 +463,121 @@ private:
 
 // And the entry point...
 
-int main( void )
+int main( int argc, char** argv )
 {
+    // Command-line option parsing
+
+    // Disable built-in error messages
+    opterr = 0;
+
+    while( true )
+    {
+        static struct option options[] = {
+            { "help",        no_argument,       0, 'h' },
+
+            { "net-name",    required_argument, 0, 'n' },
+            { "timeout",     required_argument, 0, 't' },
+            { "addr",        required_argument, 0,  1  },
+            { "port",        required_argument, 0,  2  },
+
+            { "quiet",       no_argument,       0, 'q' },
+            { "very-quiet",  no_argument,       0, 'Q' },
+            { "brief",       no_argument,       0, 'b' },
+
+            { "no-table",    no_argument,       0, 'T' },
+            { "plain",       no_argument,       0, 'P' },
+            { "ascii",       no_argument,       0, 'A' },
+
+            { "no-offline",  no_argument,       0,  3  },
+            { "no-noremote", no_argument,       0,  4  },
+            { 0,             0,                 0,  0  }
+        };
+
+        int optRes = getopt_long( argc, argv, ":hn:t:qQbTPA", options, NULL );
+
+        if( optRes == -1 )
+        {
+            break;
+        }
+
+        switch( optRes )
+        {
+            case 'h':
+                fprintf( stderr, UsageStr, argv[0] );
+                return EXIT_INVALID_ARGS;
+
+            case '?':
+                PRINT_ERR( "Unknown/ambiguous option '%s'. Try '--help'.\n", argv[optind - 1] );
+                return EXIT_INVALID_ARGS;
+
+            case ':':
+                PRINT_ERR( "Missing argument for '%s'.\n", argv[optind - 1] );
+                return EXIT_INVALID_ARGS;
+
+            case 'n':
+                netName.assign( optarg );
+                break;
+
+            case 't':
+                if( sscanf( optarg, "%u", &timeout ) != 1 )
+                {
+                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    return EXIT_INVALID_ARGS;
+                }
+                break;
+
+            case 'q':
+                quiet = true;
+                break;
+
+            case 'Q':
+                quiet = true;
+                veryQuiet = true;
+                break;
+
+            case 'b':
+                brief = true;
+                quiet = true;
+                veryQuiet = true;
+                noTable = true;
+                break;
+
+            case 'T':
+                noTable = true;
+                break;
+
+            case 'P':
+                plain = true;
+                break;
+
+            case 'A':
+                ascii = true;
+                break;
+
+            case 1: // addr
+                schedAddr.assign( optarg );
+                break;
+
+            case 2: // port
+                if( sscanf( optarg, "%hu", &schedPort ) != 1 )
+                {
+                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    return EXIT_INVALID_ARGS;
+                }
+                break;
+
+            case 3: // no-offline
+                noOffline = true;
+                break;
+
+            case 4: // no-noremote
+                noNoRemote = true;
+                break;
+        }
+    }
+
+    // Getting to it...
+
     if( quiet )
     {
         // This somehow suppresses all the internal debug messages sent onto stderr by icecc
@@ -411,34 +585,40 @@ int main( void )
     }
 
     std::unique_ptr<MsgChannel> channel;
-    std::unique_ptr<DiscoverSched> discover( new DiscoverSched( netName, timeout, schedIp, schedPort ) );
+    std::unique_ptr<DiscoverSched> discover( new DiscoverSched( netName, timeout, schedAddr, schedPort ) );
 
     long channelTimestamp = getTimestamp();
 
     do
     {
         channel.reset( discover->try_get_scheduler() );
+
+        if( discover->timed_out() )
+        {
+            return EXIT_CONNECTION_ERR;
+        }
     }
-    while( !channel && ( getTimestamp() - channelTimestamp ) < timeout );
+    while( !channel && ( getTimestamp() - channelTimestamp ) <= timeout );
+
+    // Check this twice since it can be reported with a delay?
+    if( discover->timed_out() )
+    {
+        return EXIT_CONNECTION_ERR;
+    }
 
     if( !channel )
     {
-        if( !discover->timed_out() )
-        {
-            PRINT_ERR( "Timed out while trying to connect to the scheduler.\n" );
-        }
-
-        return 1;
+        PRINT_ERR( "Timed out while trying to connect to the scheduler.\n" );
+        return EXIT_CONNECTION_ERR;
     }
 
     channel->setBulkTransfer();
-    discover.reset( nullptr );
 
     if( !channel->send_msg( MonLoginMsg() ) )
     {
         PRINT_ERR( "MsgChannel::send_msg(): Scheduler rejected the MonLoginMsg message.\n" );
 
-        return 1;
+        return EXIT_CONNECTION_ERR;
     }
 
     struct pollfd pollData { channel->fd, POLLIN | POLLPRI, 0 };
@@ -451,13 +631,13 @@ int main( void )
 
         PRINT_ERR( "poll(): (%d) %s\n", lastErrno, strerror( lastErrno ) );
 
-        return 1;
+        return EXIT_CONNECTION_ERR;
     }
     else if( pollRes == 0 )
     {
         PRINT_ERR( "poll(): Timed out white awaiting response from the scheduler.\n" );
 
-        return 1;
+        return EXIT_CONNECTION_ERR;
     }
 
     std::vector<std::unique_ptr<NodeInfo>> nodes;
@@ -471,7 +651,7 @@ int main( void )
         {
             PRINT_ERR( "MsgChannel::get_msg(): No message received from the scheduler.\n" );
 
-            return 1;
+            return EXIT_CONNECTION_ERR;
         }
 
         if( msg->type == M_MON_STATS )
@@ -493,7 +673,7 @@ int main( void )
         {
             PRINT_ERR( "Received EndMsg. Scheduler has quit.\n" );
 
-            return 1;
+            return EXIT_CONNECTION_ERR;
         }
         else
         {
@@ -506,12 +686,12 @@ int main( void )
     if( nodes.empty() ||
         std::all_of( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) -> bool
         {
-            return ( filterOffline && node->isOffline() ) || ( filterNoRemote && node->noRemote() );
+            return ( noOffline && node->isOffline() ) || ( noNoRemote && node->noRemote() );
         } ) )
     {
-        PRINT_ERR( "No useful data received.\n" );
+        PRINT_ERR( "No useful data retrieved.\n" );
 
-        return 1;
+        return EXIT_NO_DATA;
     }
     else
     {
@@ -527,7 +707,7 @@ int main( void )
             }
         } );
 
-        std::uint32_t nodeCount = std::count_if( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) { return !node->isOffline(); } );
+        std::uint32_t nodeCount = std::count_if( nodes.cbegin(), nodes.cend(), [] ( const auto& node ) { return ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ); } );
 
         if( brief )
         {
@@ -549,11 +729,11 @@ int main( void )
 
             for( const auto& node : nodes )
             {
-                if( ( !filterOffline || !node->isOffline() ) && ( !filterNoRemote || !node->noRemote() ) )
+                if( ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ) )
                 {
                     strings.emplace_back( std::to_string( node->hostId() ) );
-                    strings.emplace_back( node->isOffline() ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
-                    strings.emplace_back( node->noRemote()  ? ( lowAscii ? TICK_LO : TICK_HI ) : ( lowAscii ? NO_TICK_LO : NO_TICK_HI ) );
+                    strings.emplace_back( node->isOffline() ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
+                    strings.emplace_back( node->noRemote()  ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
                     strings.push_back( node->name() );
                     strings.push_back( node->ip() );
                     strings.emplace_back( std::to_string( node->maxJobs() ) );
@@ -563,12 +743,12 @@ int main( void )
 
             if( !noTable )
             {
-               printf( "\n%s\n", renderTable( header, strings, plain, lowAscii ).c_str() );
+               printf( "\n%s\n", renderTable( header, strings, plain, ascii ).c_str() );
             }
 
-            printf( "%u nodes, %u cores total.\n", nodeCount, coreCount );
+            printf( "%u node%s, %u core%s total.\n", nodeCount, nodeCount == 1 ? "" : "s", coreCount, coreCount == 1 ? "" : "s" );
         }
 
-        return 0;
+        return EXIT_OK;
     }
 }
