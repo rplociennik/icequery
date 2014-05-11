@@ -1,3 +1,21 @@
+/*
+    Copyright (C) 2014 Robert Płóciennik
+
+    This program is free software; you can redistribute it and/or
+    modify it under the terms of the GNU General Public License
+    as published by the Free Software Foundation; either version 2
+    of the License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+*/
+
 #include <cstdio>
 #include <memory>       // unique_ptr
 #include <algorithm>
@@ -10,6 +28,7 @@
 
 #include <poll.h>
 #include <getopt.h>
+#include <unistd.h>     // isatty()
 
 #include <icecc/comm.h>
 #include <icecc/logging.h>
@@ -20,55 +39,69 @@
 
 // Utility macros
 
-#define PRINT_BASE( shouldPrint, format, args... ) \
+#define PRINT_STREAM    stderr
+
+#define PRINT_BASE( shouldPrint, colorSeq, format, args... ) \
     do \
     { \
         if( !veryQuiet && shouldPrint ) \
         { \
-            fprintf( stderr, format, ##args ); \
+            if( useColor ) \
+            { \
+                fprintf( PRINT_STREAM, "\e[" colorSeq format "\e[0m", ##args ); \
+            } \
+            else \
+            { \
+                fprintf( PRINT_STREAM, format, ##args ); \
+            } \
         } \
     } \
     while( 0 )
 
-#define PRINT_INFO( format, args... )       PRINT_BASE( true,  "\e[1;32m" format "\e[0m", ##args )
-#define PRINT_WARN( format, args... )       PRINT_BASE( true,  "\e[1;33m" format "\e[0m", ##args )
-#define PRINT_ERR( format, args... )        PRINT_BASE( true,  "\e[31m" format "\e[0m", ##args )
-#define PRINT_DEBUG( format, args... )      PRINT_BASE( debug,  "\e[1;36m" format "\e[0m", ##args )
+#define PRINT_INFO(  format, args... )      PRINT_BASE( true,  "1;32m", format, ##args )
+#define PRINT_WARN(  format, args... )      PRINT_BASE( true,  "1;33m", format, ##args )
+#define PRINT_ERR(   format, args... )      PRINT_BASE( true,  "31m",   format, ##args )
+#define PRINT_DEBUG( format, args... )      PRINT_BASE( debug, "1;36m", format, ##args )
 
 #define STR_INTERNAL( x )                   #x
 #define STR( x )                            STR_INTERNAL( x )
 
-// Const macros
+// Version consts
 
-#define VERT_LINE_LO    "|"
-#define CROSS_LO        "+"
-#define HOR_LINE_LO     "-"
+#define VER_NO                      20140510
 
-#define VERT_LINE_HI    "│"
-#define CROSS_HI        "┼"
-#define HOR_LINE_HI     "─"
+// Table consts
 
-#define TICK_HI         "√"
-#define TICK_LO         "X"
-#define NO_TICK_HI      ""
-#define NO_TICK_LO      ""
+#define VERT_LINE_LO                "|"
+#define CROSS_LO                    "+"
+#define HOR_LINE_LO                 "-"
 
-// Exit codes
+#define TICK_LO                     "X"
+#define NO_TICK_LO                  ""
 
-#define EXIT_OK             0
+#define VERT_LINE_HI                "│"
+#define CROSS_HI                    "┼"
+#define HOR_LINE_HI                 "─"
 
-#define EXIT_INVALID_ARGS   1
-#define EXIT_CONNECTION_ERR 2
-#define EXIT_NO_DATA        3
+#define TICK_HI                     "√"
+#define NO_TICK_HI                  ""
 
 // Other consts
 
 #define TIMEOUT_DEFAULT             2000
 #define USELESS_POLLS_IN_A_ROW_MAX  3
 
+// Exit codes
+
+#define EXIT_OK                     0
+
+#define EXIT_INVALID_ARGS           1
+#define EXIT_CONNECTION_ERR         2
+#define EXIT_NO_DATA                3
+
 // Types
 
-enum Alignment
+enum class Alignment : char
 {
     Left,
     Right,
@@ -94,33 +127,44 @@ bool noOffline = false;
 bool noNoRemote = false;
 
 bool debug = false;
+bool useColor = false;
 
-// Consts
+// Global consts
 
-const char* UsageStr = R"usage(
-usage: %s [options...]
+const char* VersionStr = \
+R"ver(icequery version )ver" STR( VER_NO ) R"ver(
+Copyright (C) 2014 Robert Płóciennik
+Licensed under GPLv2
+)ver";
+
+const char* UsageStr = \
+R"usage(usage: %s [options...]
 
 General options:
 
  -h, --help            : display this info
-     --debug           : print debug output during execution
+ -v, --version         : display version info
 
 Connection options:
 
- -n, --net-name=<name> : net name to use when connecting to the scheduler
- -t, --timeout=<msecs> : timeout for establishing connection and retrieving
+ -n, --net-name=<NAME> : net name to use when connecting to the scheduler
+ -t, --timeout=<MSECS> : timeout for establishing connection and retrieving
                          a single message from the scheduler (default: )usage" STR( TIMEOUT_DEFAULT ) R"usage()
-     --addr=<address>  : scheduler address for avoiding broadcasting and
+     --addr=<ADDRESS>  : scheduler address for avoiding broadcasting and
                          attempting to connect directly
-     --port=<port>     : scheduler port for direct connection
+     --port=<PORT>     : scheduler port for direct connection
 
 General output options:
+
+     --color=<WHEN>    : whether to colorize own messages;
+                         WHEN can be: 'auto' (default), 'always', or 'never'
 
  -q, --quiet           : suppress any icecc debug messages sent to stderr
  -Q, --very-quiet      : suppress all error messages entirely
  -b, --brief           : on success return only a single numeric value
                          representing the number of available cores
                          (implies --very-quiet, --no-table)
+     --debug           : print debug output during execution
 
 Table options:
 
@@ -449,15 +493,15 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
 
                 switch( align )
                 {
-                    case Left:
+                    case Alignment::Left:
                         str.append( lenDiff, ' ' );
                         break;
 
-                    case Right:
+                    case Alignment::Right:
                         str.insert( 0, lenDiff, ' ' );
                         break;
 
-                    case Center:
+                    case Alignment::Center:
                         str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' );
                         break;
                 }
@@ -533,6 +577,19 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
 
 int main( int argc, char** argv )
 {
+    // Set the defaults
+
+    int fd = fileno( PRINT_STREAM );
+
+    if( fd == -1 )
+    {
+        useColor = false;
+    }
+    else
+    {
+        useColor = ( isatty( fd ) == 1 );
+    }
+
     // Command-line option parsing
 
     // Disable built-in error messages
@@ -542,15 +599,18 @@ int main( int argc, char** argv )
     {
         static struct option options[] = {
             { "help",        no_argument,       0, 'h' },
+            { "version",     no_argument,       0, 'v' },
 
             { "net-name",    required_argument, 0, 'n' },
             { "timeout",     required_argument, 0, 't' },
             { "addr",        required_argument, 0,  1  },
             { "port",        required_argument, 0,  2  },
 
+            { "color",       required_argument, 0,  5  },
             { "quiet",       no_argument,       0, 'q' },
             { "very-quiet",  no_argument,       0, 'Q' },
             { "brief",       no_argument,       0, 'b' },
+            { "debug",       no_argument,       0,  13 },
 
             { "no-table",    no_argument,       0, 'T' },
             { "plain",       no_argument,       0, 'P' },
@@ -559,12 +619,10 @@ int main( int argc, char** argv )
             { "no-offline",  no_argument,       0,  3  },
             { "no-noremote", no_argument,       0,  4  },
 
-            { "debug",       no_argument,       0,  13 },
-
             { 0,             0,                 0,  0  }
         };
 
-        int optRes = getopt_long( argc, argv, ":hn:t:qQbTPA", options, NULL );
+        int optRes = getopt_long( argc, argv, ":hvn:t:qQbTPA", options, NULL );
 
         if( optRes == -1 )
         {
@@ -576,6 +634,10 @@ int main( int argc, char** argv )
             case 'h':
                 fprintf( stderr, UsageStr, argv[0] );
                 return EXIT_INVALID_ARGS;
+
+            case 'v': // version
+                printf( VersionStr );
+                return EXIT_OK;
 
             case '?':
                 PRINT_ERR( "Unknown/ambiguous option '%s'. Try '--help'.\n", argv[optind - 1] );
@@ -643,6 +705,22 @@ int main( int argc, char** argv )
 
             case 4: // no-noremote
                 noNoRemote = true;
+                break;
+
+            case 5: // color
+                if( strcmp( optarg, "always" ) == 0 )
+                {
+                    useColor = true;
+                }
+                else if( strcmp( optarg, "never" ) == 0 )
+                {
+                    useColor = false;
+                }
+                else if( strcmp( optarg, "auto" ) != 0 )
+                {
+                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    return EXIT_INVALID_ARGS;
+                }
                 break;
 
             case 13: // debug
