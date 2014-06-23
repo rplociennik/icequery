@@ -90,7 +90,6 @@
 
 #define TIMEOUT_DEFAULT             2000
 #define RTIMEOUT_DEFAULT            2000
-#define USELESS_POLLS_IN_A_ROW_MAX  3
 
 // Exit codes
 
@@ -822,12 +821,12 @@ int main( int argc, char** argv )
     uint32_t hostIdMax = 0;
 
     int pollRes;
-    int uselessPollsInARow = 0;
+    bool wasPollUseful;
 
     do
     {
         pollRes = poll( &pollData, 1, rtimeout );
-        bool wasPollUseful = false;
+        wasPollUseful = false;
         static uint32_t msgNo = 0;
 
         if( pollRes < 0 )
@@ -872,7 +871,7 @@ int main( int argc, char** argv )
                 }
                 else if( msg->type == M_END )
                 {
-                    PRINT_ERR( "Received 'EndMsg'. Scheduler has quit.\n" );
+                    PRINT_ERR( "Received M_END (%d). Scheduler has quit.\n", M_END );
 
                     return EXIT_CONNECTION_ERR;
                 }
@@ -886,17 +885,8 @@ int main( int argc, char** argv )
                     PRINT_DEBUG( "Message %u considered useless\n", msgNo );
                 }
             }
-
-            if( !wasPollUseful )
-            {
-                ++uselessPollsInARow;
-            }
-            else
-            {
-                uselessPollsInARow = 0;
-            }
         }
-    } while( pollRes != 0 && uselessPollsInARow < USELESS_POLLS_IN_A_ROW_MAX );
+    } while( pollRes != 0 && wasPollUseful );
 
     if( nodes.empty() ||
         std::all_of( nodes.cbegin(), nodes.cend(), [] ( const std::unique_ptr<NodeInfo>& node ) -> bool
