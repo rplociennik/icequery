@@ -89,6 +89,7 @@
 // Other consts
 
 #define TIMEOUT_DEFAULT             2000
+#define RTIMEOUT_DEFAULT            2000
 #define USELESS_POLLS_IN_A_ROW_MAX  3
 
 // Exit codes
@@ -112,6 +113,7 @@ enum class Alignment : char
 
 std::string netName;
 int timeout = TIMEOUT_DEFAULT;
+int rtimeout = RTIMEOUT_DEFAULT;
 std::string schedAddr;
 uint16_t schedPort = 0;
 
@@ -142,41 +144,43 @@ R"usage(usage: %s [options...]
 
 General options:
 
- -h, --help            : display this info
- -v, --version         : display version info
+ -h, --help             : display this info
+ -v, --version          : display version info
 
 Connection options:
 
- -n, --net-name=<NAME> : net name to use when connecting to the scheduler
- -t, --timeout=<MSECS> : timeout for establishing connection and retrieving
-                         a single message from the scheduler (default: )usage" STR( TIMEOUT_DEFAULT ) R"usage()
-     --addr=<ADDRESS>  : scheduler address for avoiding broadcasting and
-                         attempting to connect directly
-     --port=<PORT>     : scheduler port for direct connection
+ -n, --net-name=<NAME>  : net name to use when connecting to the scheduler
+ -t, --timeout=<MSECS>  : timeout for establishing connection with the sceduler
+                          (default: )usage" STR( TIMEOUT_DEFAULT ) R"usage()
+ -r, --rtimeout=<MSECS> : timeout for retrieving a single message from the
+                          scheduler (default: )usage" STR( RTIMEOUT_DEFAULT ) R"usage()
+     --addr=<ADDRESS>   : scheduler address for avoiding broadcasting and
+                          attempting to connect directly
+     --port=<PORT>      : scheduler port for direct connection
 
 General output options:
 
-     --color=<WHEN>    : whether to colorize own messages;
-                         WHEN can be: 'auto' (default), 'always', or 'never'
+     --color=<WHEN>     : whether to colorize own messages;
+                          WHEN can be: 'auto' (default), 'always', or 'never'
 
- -q, --quiet           : suppress any icecc debug messages sent to stderr
- -Q, --very-quiet      : suppress all error messages entirely
- -b, --brief           : on success return only a single numeric value
-                         representing the number of available cores
-                         (implies --very-quiet, --no-table)
-     --debug           : print debug output during execution
+ -q, --quiet            : suppress any icecc debug messages sent to stderr
+ -Q, --very-quiet       : suppress all error messages entirely
+ -b, --brief            : on success return only a single numeric value
+                          representing the number of available cores
+                          (implies --very-quiet, --no-table)
+     --debug            : print debug output during execution
 
 Table options:
 
- -P, --plain           : print the table without any borders
- -A, --ascii           : produce only ASCII output by displaying table borders
-                         as low order ASCII characters and performing
-                         transliteration on any names encountered
- -T, --no-table        : do not print the table entirely, only a summary on
-                         success
+ -P, --plain            : print the table without any borders
+ -A, --ascii            : produce only ASCII output by displaying table borders
+                          as low order ASCII characters and performing
+                          transliteration on any names encountered
+ -T, --no-table         : do not print the table entirely, only a summary on
+                          success
 
- --no-offline  [*]     : do not include offline nodes in the table
- --no-noremote [*]     : do not include 'no remote' nodes in the table
+ --no-offline  [*]      : do not include offline nodes in the table
+ --no-noremote [*]      : do not include 'no remote' nodes in the table
 
  [*] Selected options affect the display of the table only, as neither offline
      nor 'no remote' nodes are taken into account when calculating totals.
@@ -627,6 +631,7 @@ int main( int argc, char** argv )
 
             { "net-name",    required_argument, 0, 'n' },
             { "timeout",     required_argument, 0, 't' },
+            { "rtimeout",    required_argument, 0, 'r' },
             { "addr",        required_argument, 0,  1  },
             { "port",        required_argument, 0,  2  },
 
@@ -646,7 +651,7 @@ int main( int argc, char** argv )
             { 0,             0,                 0,  0  }
         };
 
-        int optRes = getopt_long( argc, argv, ":hvn:t:qQbTPA", options, NULL );
+        int optRes = getopt_long( argc, argv, ":hvn:t:r:qQbTPA", options, NULL );
 
         if( optRes == -1 )
         {
@@ -677,6 +682,14 @@ int main( int argc, char** argv )
 
             case 't':
                 if( sscanf( optarg, "%u", &timeout ) != 1 )
+                {
+                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    return EXIT_INVALID_ARGS;
+                }
+                break;
+
+            case 'r':
+                if( sscanf( optarg, "%u", &rtimeout ) != 1 )
                 {
                     PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
                     return EXIT_INVALID_ARGS;
@@ -813,7 +826,7 @@ int main( int argc, char** argv )
 
     do
     {
-        pollRes = poll( &pollData, 1, timeout );
+        pollRes = poll( &pollData, 1, rtimeout );
         bool wasPollUseful = false;
         static uint32_t msgNo = 0;
 
