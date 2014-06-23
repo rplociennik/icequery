@@ -394,6 +394,30 @@ private:
 
 // Other functions
 
+const char* MsgTypeToStr( MsgType msgType )
+{
+    switch( msgType )
+    {
+        case MsgType::M_MON_GET_CS:
+            return "M_MON_GET_CS";
+
+        case MsgType::M_MON_JOB_BEGIN:
+            return "M_MON_JOB_BEGIN";
+
+        case MsgType::M_MON_JOB_DONE:
+            return "M_MON_JOB_DONE";
+
+        case MsgType::M_MON_LOCAL_JOB_BEGIN:
+            return "M_MON_LOCAL_JOB_BEGIN";
+
+        case MsgType::M_MON_STATS:
+            return "M_MON_STATS";
+
+        default:
+            return "<Unknown>";
+    }
+}
+
 std::string renderTable( const std::vector<ColumnHeader>& header, const std::vector<std::string>& strings, bool plain, bool ascii )
 {
     auto columnCount = header.size();
@@ -809,7 +833,7 @@ int main( int argc, char** argv )
 
                 if( !msg )
                 {
-                    PRINT_ERR( "MsgChannel::get_msg(): No message received from the scheduler.\n" );
+                    PRINT_ERR( "MsgChannel::get_msg(): No messages received from the scheduler.\n" );
 
                     return EXIT_CONNECTION_ERR;
                 }
@@ -841,7 +865,7 @@ int main( int argc, char** argv )
                 }
                 else
                 {
-                    PRINT_DEBUG( "Message %u of type %d ignored\n", msgNo, msg->type );
+                    PRINT_DEBUG( "Message %u of type %s (%d) ignored\n", msgNo, MsgTypeToStr( msg->type ), msg->type );
                 }
 
                 if( !isMsgUseful )
