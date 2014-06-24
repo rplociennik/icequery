@@ -6,7 +6,13 @@ find_package( Icecream REQUIRED )
 find_package( ICU 4.6 REQUIRED "i18n" )
 
 if( CMAKE_COMPILER_IS_GNUCXX OR "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" )
-    set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Wextra" )
+    if( CMAKE_COMPILER_IS_GNUCXX AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "4.7")
+        set( CXX_STANDARD "c++0x" )
+    else()
+        set( CXX_STANDARD "c++11" )
+    endif()
+
+    set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=${CXX_STANDARD} -Wall -Wextra" )
 endif()
 
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DU_USING_ICU_NAMESPACE=0" )

@@ -334,6 +334,9 @@ public:
 private:
     NodeInfo( uint32_t hostId )
         : m_hostId( hostId )
+        , m_maxJobs( 0 )
+        , m_noRemote( false )
+        , m_offline( false )
     {
     }
 
@@ -347,12 +350,12 @@ private:
     }
 
 private:
-    uint32_t m_hostId = 0;
+    uint32_t m_hostId;
     std::string m_name;
     std::string m_ip;
-    uint32_t m_maxJobs = 0;
-    bool m_noRemote = false;
-    bool m_offline = false;
+    uint32_t m_maxJobs;
+    bool m_noRemote;
+    bool m_offline;
     std::string m_platform;
 };
 
