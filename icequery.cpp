@@ -19,12 +19,14 @@
 #include <cstdio>
 #include <memory>       // unique_ptr
 #include <algorithm>
+#include <locale>       // isblank()
 #include <vector>
 
 #include <ctime>        // clock_gettime()
 #include <cstring>      // strerror()
 #include <cstdint>      // uint32_t
 #include <cctype>       // tolower
+#include <cstdlib>      // abort()
 
 #include <poll.h>
 #include <getopt.h>
@@ -33,13 +35,21 @@
 #include <icecc/comm.h>
 #include <icecc/logging.h>
 
+#define U_HIDE_DRAFT_API
+#define U_HIDE_DEPRECATED_API
+#define U_HIDE_OBSOLETE_API
+#define U_HIDE_SYSTEM_API
+#define U_HIDE_INTERNAL_API
+
 #include <unicode/unistr.h>     // icu::UnicodeString
 #include <unicode/translit.h>   // icu::Transliterator
 #include <unicode/errorcode.h>  // icu::ErrorCode
+#include <unicode/ucnv.h>       // icu::ucnv_getDefaultName
+#include <unicode/ustdio.h>     // icu::u_printf()
 
 // Utility macros
 
-#define PRINT_STREAM    stderr
+#define PRINT_STREAM stderr
 
 #define PRINT_BASE( shouldPrint, colorSeq, format, args... ) \
     do \
@@ -58,33 +68,33 @@
     } \
     while( 0 )
 
-#define PRINT_INFO(  format, args... )      PRINT_BASE( true,  "1;32m", format, ##args )
-#define PRINT_WARN(  format, args... )      PRINT_BASE( true,  "1;33m", format, ##args )
-#define PRINT_ERR(   format, args... )      PRINT_BASE( true,  "31m",   format, ##args )
-#define PRINT_DEBUG( format, args... )      PRINT_BASE( debug, "1;36m", format, ##args )
+#define PRINT_INFO(  format, args... )  PRINT_BASE( true,  "1;32m", format, ##args )
+#define PRINT_WARN(  format, args... )  PRINT_BASE( true,  "1;33m", format, ##args )
+#define PRINT_ERR(   format, args... )  PRINT_BASE( true,  "31m",   format, ##args )
+#define PRINT_DEBUG( format, args... )  PRINT_BASE( debug, "1;36m", format, ##args )
 
-#define STR_INTERNAL( x )                   #x
-#define STR( x )                            STR_INTERNAL( x )
+#define STR_INTERNAL( x )               #x
+#define STR( x )                        STR_INTERNAL( x )
 
 // Version consts
 
-#define VER_NO                      20140510
+#define VER_NO                      20140628
 
 // Table consts
 
-#define VERT_LINE_LO                "|"
-#define CROSS_LO                    "+"
-#define HOR_LINE_LO                 "-"
+#define VERT_LINE_7BIT              "|"
+#define CROSS_7BIT                  "+"
+#define HOR_LINE_7BIT               "-"
 
-#define TICK_LO                     "X"
-#define NO_TICK_LO                  ""
+#define TICK_7BIT                   "X"
+#define NO_TICK_7BIT                ""
 
-#define VERT_LINE_HI                "│"
-#define CROSS_HI                    "┼"
-#define HOR_LINE_HI                 "─"
+#define VERT_LINE_UTF8              "│"
+#define CROSS_UTF8                  "┼"
+#define HOR_LINE_UTF8               "─"
 
-#define TICK_HI                     "√"
-#define NO_TICK_HI                  ""
+#define TICK_UTF8                   "√"
+#define NO_TICK_UTF8                ""
 
 // Other consts
 
@@ -98,15 +108,7 @@
 #define EXIT_INVALID_ARGS           1
 #define EXIT_CONNECTION_ERR         2
 #define EXIT_NO_DATA                3
-
-// Types
-
-enum class Alignment : char
-{
-    Left,
-    Right,
-    Center
-};
+#define EXIT_LIBRARY_ERR            4
 
 // Global variables
 
@@ -120,9 +122,10 @@ bool quiet = false;
 bool veryQuiet = false;
 bool brief = false;
 
-bool noTable = false;
+std::string customEncoding;
 bool plain = false;
 bool ascii = false;
+bool noTable = false;
 
 bool noOffline = false;
 bool noNoRemote = false;
@@ -171,10 +174,12 @@ General output options:
 
 Table options:
 
+     --encoding=<ENC>   : encoding to use when interpreting names
+                          (platform default: '%s', must be a valid ICU encoding)
  -P, --plain            : print the table without any borders
- -A, --ascii            : produce only ASCII output by displaying table borders
-                          as low order ASCII characters and performing
-                          transliteration on any names encountered
+ -A, --ascii            : produce only 7-bit ASCII output by displaying table
+                          borders as 7-bit characters and performing
+                          transliteration on any name encountered
  -T, --no-table         : do not print the table entirely, only a summary on
                           success
 
@@ -191,6 +196,7 @@ Exit codes:
  1 : Command-line error
  2 : Connection error
  3 : No useful data retrieved
+ 4 : Library error
 )usage";
 
 // Utility functions
@@ -218,7 +224,43 @@ std::string& toLower( std::string& str )
     return str;
 }
 
-// Classes
+bool checkEncoding( const std::string& encoding )
+{
+    if( encoding.empty() || std::all_of( encoding.cbegin(), encoding.cend(), std::isblank ) )
+    {
+        return false;
+    }
+
+    icu::ErrorCode errorCode;
+    UConverter* converter = ucnv_open( encoding.c_str(), errorCode );
+
+    if( converter )
+    {
+        ucnv_close( converter );
+    }
+
+    if( errorCode.isFailure() )
+    {
+        PRINT_ERR( "ucnv_open(): %s\n", errorCode.errorName() );
+    }
+
+    return !errorCode.isFailure();
+}
+
+// Types/Classes
+
+enum class Alignment : char
+{
+    Left,
+    Right,
+    Center
+};
+
+enum class Encoding : char
+{
+    UTF8,
+    Custom
+};
 
 class NodeInfo
 {
@@ -362,16 +404,16 @@ private:
 class ColumnHeader
 {
 public:
-    ColumnHeader( Alignment alignment, bool treatAsUnicode, const std::string& name )
+    ColumnHeader( Alignment alignment, Encoding encoding, const std::string& name )
         : m_alignment( alignment )
-        , m_treatAsUnicode( treatAsUnicode )
+        , m_encoding( encoding )
         , m_name( name )
     {
     }
 
-    ColumnHeader( Alignment alignment, bool treatAsUnicode, const std::string&& name )
+    ColumnHeader( Alignment alignment, Encoding encoding, const std::string&& name )
         : m_alignment( alignment )
-        , m_treatAsUnicode( treatAsUnicode )
+        , m_encoding( encoding )
         , m_name( std::move( name ) )
     {
     }
@@ -382,9 +424,9 @@ public:
         return m_alignment;
     }
 
-    bool treatAsUnicode() const
+    Encoding encoding() const
     {
-        return m_treatAsUnicode;
+        return m_encoding;
     }
 
     const std::string& name() const
@@ -394,7 +436,7 @@ public:
 
 private:
     Alignment m_alignment;
-    bool m_treatAsUnicode;
+    Encoding m_encoding;
     std::string m_name;
 };
 
@@ -424,7 +466,7 @@ const char* MsgTypeToStr( MsgType msgType )
     }
 }
 
-std::string renderTable( const std::vector<ColumnHeader>& header, const std::vector<std::string>& strings, bool plain, bool ascii )
+icu::UnicodeString renderTable( const std::vector<ColumnHeader>& header, const std::vector<std::string>& strings, bool plain, bool ascii )
 {
     auto columnCount = header.size();
     auto rowCount = strings.size() / columnCount;
@@ -432,7 +474,7 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
     std::vector<std::size_t> colMaxLens( columnCount );
 
     std::unique_ptr<icu::Transliterator> trans;
-    std::vector<std::string> data( columnCount * ( rowCount + 1 ) );
+    std::vector<icu::UnicodeString> data( columnCount * ( rowCount + 1 ) );
     std::vector<std::size_t> lens( columnCount * ( rowCount + 1 ) );
 
     // Init Transliterator
@@ -444,7 +486,7 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
         if( errorCode.isFailure() )
         {
             PRINT_ERR( "icu::Transliterator::createInstance(): %s\n", errorCode.errorName() );
-            trans.reset();
+            std::exit( EXIT_LIBRARY_ERR );
         }
     }
 
@@ -457,47 +499,38 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
         for( std::size_t r = 0; r < rowCount + 1; ++r )
         {
             std::size_t& len = lens[columnCount * r + c];
-            std::string& res = data[columnCount * r + c];
+            icu::UnicodeString& res = data[columnCount * r + c];
 
             const std::string& origStr = r == 0 ? header[c].name() : strings[columnCount * (r - 1) + c];
+            const Encoding encoding = header[c].encoding();
 
-            if( header[c].treatAsUnicode() )
+            if( r == 0 || encoding == Encoding::UTF8 )
             {
-                icu::UnicodeString uniStr( origStr.c_str() );
-
-                if( trans )
-                {
-                    trans->transliterate( uniStr );
-
-                    std::unique_ptr<char> buff( new char[uniStr.extract( 0, uniStr.length(), static_cast<char*>( NULL ) )] );
-
-                    uniStr.extract( 0, uniStr.length(), buff.get() );
-                    res.assign( buff.get() );
-                }
-                else
-                {
-                    res.assign( origStr );
-                }
-
-                len = static_cast<std::size_t>( uniStr.length() );
+                res = std::move( icu::UnicodeString::fromUTF8( origStr ) );
             }
             else
             {
-                res.assign( origStr );
-                len = res.length();
+                res = std::move( icu::UnicodeString( origStr.c_str(), customEncoding.c_str() ) );
             }
+
+            if( trans )
+            {
+                trans->transliterate( res );
+            }
+
+            len = static_cast<std::size_t>( res.length() );
 
             // Add 1 char margin to the first and last column
             if( !plain )
             {
                 if( c == 0 )
                 {
-                    res.insert( 0, 1, ' ' );
+                    res.insert( 0, ' ' );
                     ++len;
                 }
                 else if( c == columnCount - 1 )
                 {
-                    res.append( 1, ' ' );
+                    res.append( ' ' );
                     ++len;
                 }
             }
@@ -514,7 +547,7 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
 
         for( std::size_t r = 0; r < rowCount + 1; ++r )
         {
-            std::string& str = data[columnCount * r + c];
+            icu::UnicodeString& str = data[columnCount * r + c];
             const std::size_t& len = lens[columnCount * r + c];
 
             if( len < maxLen )
@@ -524,15 +557,15 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
                 switch( align )
                 {
                     case Alignment::Left:
-                        str.append( lenDiff, ' ' );
+                        str.append( icu::UnicodeString::fromUTF8( std::string( lenDiff, ' ' ) ) );
                         break;
 
                     case Alignment::Right:
-                        str.insert( 0, lenDiff, ' ' );
+                        str.insert( 0, icu::UnicodeString::fromUTF8( std::string( lenDiff, ' ' ) ) );
                         break;
 
                     case Alignment::Center:
-                        str.insert( 0, lenDiff / 2, ' ' ).append( lenDiff - lenDiff / 2, ' ' );
+                        str.insert( 0, icu::UnicodeString::fromUTF8( std::string( lenDiff / 2, ' ' ) ) ).append( icu::UnicodeString::fromUTF8( std::string( lenDiff - lenDiff / 2, ' ' ) ) );
                         break;
                 }
             }
@@ -540,10 +573,7 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
     }
 
     // Render the table
-    std::string table;
-
-    std::size_t lensSum = std::accumulate( lens.cbegin(), lens.cend(), static_cast<std::size_t>( 0 ) );
-    table.reserve( ( lensSum + ( lensSum - 1 ) + 1 ) * ( plain ? 1 : 3 ) + 1 );
+    icu::UnicodeString table;
 
     for( std::size_t r = 0; r < rowCount + 1; ++r )
     {
@@ -553,25 +583,18 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
             {
                 if( plain )
                 {
-                   table.append( 1, ' ' );
+                   table.append( ' ' );
                 }
                 else
                 {
-                    if( ascii )
-                    {
-                        table.append( " " VERT_LINE_LO " " );
-                    }
-                    else
-                    {
-                        table.append( " " VERT_LINE_HI " " );
-                    }
+                    table.append( icu::UnicodeString::fromUTF8( std::string( ascii ? ( " " VERT_LINE_7BIT " " ) : ( " " VERT_LINE_UTF8 " " ) ) ) );
                 }
             }
 
             table.append( data[columnCount * r + c] );
         }
 
-        table.append( 1, '\n' );
+        table.append( '\n' );
 
         // Draw the horizontal line below the header
         if( r == 0 && !plain )
@@ -580,23 +603,16 @@ std::string renderTable( const std::vector<ColumnHeader>& header, const std::vec
             {
                 if( c > 0 )
                 {
-                    if( ascii )
-                    {
-                        table.append( HOR_LINE_LO CROSS_LO HOR_LINE_LO );
-                    }
-                    else
-                    {
-                        table.append( HOR_LINE_HI CROSS_HI HOR_LINE_HI );
-                    }
+                    table.append( ascii ? ( HOR_LINE_7BIT CROSS_7BIT HOR_LINE_7BIT ) : ( HOR_LINE_UTF8 CROSS_UTF8 HOR_LINE_UTF8 ) );
                 }
 
                 for( std::size_t i = 0; i < colMaxLens[c]; ++i )
                 {
-                    table.append( ascii ? HOR_LINE_LO : HOR_LINE_HI );
+                    table.append( ascii ? HOR_LINE_7BIT : HOR_LINE_UTF8 );
                 }
             }
 
-            table.append( 1, '\n' );
+            table.append( '\n' );
         }
     }
 
@@ -619,6 +635,8 @@ int main( int argc, char** argv )
     {
         useColor = ( isatty( fd ) == 1 );
     }
+
+    customEncoding.assign( ucnv_getDefaultName() );
 
     // Command-line option parsing
 
@@ -643,9 +661,10 @@ int main( int argc, char** argv )
             { "brief",       no_argument,       0, 'b' },
             { "debug",       no_argument,       0,  13 },
 
-            { "no-table",    no_argument,       0, 'T' },
+            { "encoding",    required_argument, 0,  6  },
             { "plain",       no_argument,       0, 'P' },
             { "ascii",       no_argument,       0, 'A' },
+            { "no-table",    no_argument,       0, 'T' },
 
             { "no-offline",  no_argument,       0,  3  },
             { "no-noremote", no_argument,       0,  4  },
@@ -653,7 +672,7 @@ int main( int argc, char** argv )
             { 0,             0,                 0,  0  }
         };
 
-        int optRes = getopt_long( argc, argv, ":hvn:t:r:qQbTPA", options, NULL );
+        int optRes = getopt_long( argc, argv, ":hvn:t:r:qQbPAT", options, NULL );
 
         if( optRes == -1 )
         {
@@ -663,7 +682,7 @@ int main( int argc, char** argv )
         switch( optRes )
         {
             case 'h':
-                fprintf( stderr, UsageStr, argv[0] );
+                fprintf( stderr, UsageStr, argv[0], customEncoding.c_str() );
                 return EXIT_INVALID_ARGS;
 
             case 'v': // version
@@ -714,8 +733,15 @@ int main( int argc, char** argv )
                 noTable = true;
                 break;
 
-            case 'T':
-                noTable = true;
+            case 6: // encoding
+                customEncoding.assign( optarg );
+
+                if( !checkEncoding( customEncoding ) )
+                {
+                    PRINT_ERR( "Invalid ICU encoding '%s'.\n", optarg );
+                    return EXIT_INVALID_ARGS;
+                }
+
                 break;
 
             case 'P':
@@ -724,6 +750,10 @@ int main( int argc, char** argv )
 
             case 'A':
                 ascii = true;
+                break;
+
+            case 'T':
+                noTable = true;
                 break;
 
             case 1: // addr
@@ -926,13 +956,13 @@ int main( int argc, char** argv )
             if( !noTable )
             {
                 const std::vector<ColumnHeader> header {
-                    { Alignment::Right , false, "Node #"     },
-                    { Alignment::Center, true,  "Offline?"   },
-                    { Alignment::Center, true,  "No remote?" },
-                    { Alignment::Left  , true,  "Name"       },
-                    { Alignment::Left  , false, "IP"         },
-                    { Alignment::Right , false, "Cores"      },
-                    { Alignment::Left  , false, "Platform"   }
+                    { Alignment::Right , Encoding::UTF8     , "Node #"     },
+                    { Alignment::Center, Encoding::UTF8     , "Offline?"   },
+                    { Alignment::Center, Encoding::UTF8     , "No remote?" },
+                    { Alignment::Left  , Encoding::Custom   , "Name"       },
+                    { Alignment::Left  , Encoding::UTF8     , "IP"         },
+                    { Alignment::Right , Encoding::UTF8     , "Cores"      },
+                    { Alignment::Left  , Encoding::UTF8     , "Platform"   }
                 };
 
                 std::vector<std::string> strings;
@@ -943,8 +973,8 @@ int main( int argc, char** argv )
                     if( ( !noOffline || !node->isOffline() ) && ( !noNoRemote || !node->noRemote() ) )
                     {
                         strings.emplace_back( std::to_string( node->hostId() ) );
-                        strings.emplace_back( node->isOffline() ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
-                        strings.emplace_back( node->noRemote()  ? ( ascii ? TICK_LO : TICK_HI ) : ( ascii ? NO_TICK_LO : NO_TICK_HI ) );
+                        strings.emplace_back( node->isOffline() ? ( ascii ? TICK_7BIT : TICK_UTF8 ) : ( ascii ? NO_TICK_7BIT : NO_TICK_UTF8 ) );
+                        strings.emplace_back( node->noRemote()  ? ( ascii ? TICK_7BIT : TICK_UTF8 ) : ( ascii ? NO_TICK_7BIT : NO_TICK_UTF8 ) );
                         strings.push_back( node->name() );
                         strings.push_back( node->ip() );
                         strings.emplace_back( std::to_string( node->maxJobs() ) );
@@ -952,7 +982,7 @@ int main( int argc, char** argv )
                     }
                 }
 
-                printf( "\n%s\n", renderTable( header, strings, plain, ascii ).c_str() );
+                u_printf( "\n%S\n", renderTable( header, strings, plain, ascii ).getTerminatedBuffer() );
             }
 
             printf( "%u node%s, %u core%s total.\n", nodeCount, nodeCount == 1 ? "" : "s", coreCount, coreCount == 1 ? "" : "s" );
