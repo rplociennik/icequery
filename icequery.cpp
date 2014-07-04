@@ -984,7 +984,7 @@ int main( int argc, char** argv )
                     }
                 }
 
-                u_printf( "\n%S\n", renderTable( header, strings, plain, ascii ).getTerminatedBuffer() );
+                u_fputs( renderTable( header, strings, plain, ascii ).insert( 0, '\n' ).getTerminatedBuffer(), u_get_stdout() );
             }
 
             printf( "%u node%s, %u core%s total.\n", nodeCount, nodeCount == 1 ? "" : "s", coreCount, coreCount == 1 ? "" : "s" );
