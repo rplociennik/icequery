@@ -78,7 +78,7 @@
 
 // Version consts
 
-#define VER_NO                      20140628
+#define VER_NO                      20140705
 
 // Table consts
 

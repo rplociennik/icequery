@@ -30,4 +30,5 @@ target_link_libraries(
     ${ICU_LIBRARIES}
     ${ICU_I18N_LIBRARIES}
     ${CMAKE_DL_LIBS}
+    rt
 )
