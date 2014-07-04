@@ -643,6 +643,8 @@ int main( int argc, char** argv )
     // Disable built-in error messages
     opterr = 0;
 
+    int currOpt;
+
     while( true )
     {
         static struct option options[] = {
@@ -672,7 +674,7 @@ int main( int argc, char** argv )
             { 0,             0,                 0,  0  }
         };
 
-        int optRes = getopt_long( argc, argv, ":hvn:t:r:qQbPAT", options, NULL );
+        int optRes = getopt_long( argc, argv, ":hvn:t:r:qQbPAT", options, &currOpt );
 
         if( optRes == -1 )
         {
@@ -694,7 +696,7 @@ int main( int argc, char** argv )
                 return EXIT_INVALID_ARGS;
 
             case ':':
-                PRINT_ERR( "Missing argument for '%s'.\n", argv[optind - 1] );
+                PRINT_ERR( "Missing argument for '%s'.\n", options[currOpt].name );
                 return EXIT_INVALID_ARGS;
 
             case 'n':
@@ -704,7 +706,7 @@ int main( int argc, char** argv )
             case 't':
                 if( sscanf( optarg, "%u", &timeout ) != 1 )
                 {
-                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    PRINT_ERR( "Invalid argument for '%s'.\n", options[currOpt].name );
                     return EXIT_INVALID_ARGS;
                 }
                 break;
@@ -712,7 +714,7 @@ int main( int argc, char** argv )
             case 'r':
                 if( sscanf( optarg, "%u", &rtimeout ) != 1 )
                 {
-                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    PRINT_ERR( "Invalid argument for '%s'.\n", options[currOpt].name );
                     return EXIT_INVALID_ARGS;
                 }
                 break;
@@ -763,7 +765,7 @@ int main( int argc, char** argv )
             case 2: // port
                 if( sscanf( optarg, "%hu", &schedPort ) != 1 )
                 {
-                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    PRINT_ERR( "Invalid argument for '%s'.\n", options[currOpt].name );
                     return EXIT_INVALID_ARGS;
                 }
                 break;
@@ -787,7 +789,7 @@ int main( int argc, char** argv )
                 }
                 else if( strcmp( optarg, "auto" ) != 0 )
                 {
-                    PRINT_ERR( "Invalid argument for '%s'.\n", argv[optind - 1] );
+                    PRINT_ERR( "Invalid argument for '%s'.\n", options[currOpt].name );
                     return EXIT_INVALID_ARGS;
                 }
                 break;
